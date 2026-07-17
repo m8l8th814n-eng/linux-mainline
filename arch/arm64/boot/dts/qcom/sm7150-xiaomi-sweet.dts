@@ -259,13 +259,14 @@
 };
 
 &spi8 {
-	status = "okay";
-
 	irled@0 {
 		compatible = "ir-spi-led";
 		reg = <0>;
 		spi-max-frequency = <19200000>;
+
 	};
+	status = "okay";
+
 };
 
 &tlmm {

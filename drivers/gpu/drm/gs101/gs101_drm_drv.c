@@ -94,10 +94,22 @@ static int gs101_drm_bind(struct device *dev)
 	 * So: prove the components bind, and leave registration for when there
 	 * is something to register. Add back, in order:
 	 *
+	 *	aperture_remove_conflicting_devices(0xfac00000, 0x9e3400,
+	 *					    gs101_drm_driver.name);
 	 *	drm_vblank_init(drm, drm->mode_config.num_crtc);
 	 *	drm_mode_config_reset(drm);
 	 *	drm_dev_register(drm, 0);
 	 *	drm_fbdev_dma_setup(drm, 32);
+	 *
+	 * The aperture call has to come first, and it is not optional. simpledrm
+	 * is bound to chosen:framebuffer-0 and owns splash@fac00000 -- the same
+	 * memory DPP0 is scanning out. Registering without evicting it leaves two
+	 * cards driving one panel. That is the same mechanism by which i915 takes
+	 * over from the EFI framebuffer.
+	 *
+	 * The region is the splash reservation: 0xfac00000, 1080*2400*4 bytes.
+	 * Better to read it from the reserved-memory node than hardcode it, since
+	 * the size is only correct while the panel is 1080x2400.
 	 */
 	dev_info(dev, "all display components bound; not registering DRM device yet\n");
 
@@ -123,6 +135,7 @@ static const struct component_master_ops gs101_drm_master_ops = {
  */
 static const struct of_device_id gs101_drm_component_ids[] = {
 	{ .compatible = "google,gs101-decon" },
+	{ .compatible = "google,gs101-dpp" },
 	{ }
 };
 
@@ -186,6 +199,7 @@ static struct platform_driver gs101_drm_platform_driver = {
 };
 
 static struct platform_driver * const gs101_drm_drivers[] = {
+	&gs101_dpp_driver,
 	&gs101_decon_driver,
 	&gs101_drm_platform_driver,
 };

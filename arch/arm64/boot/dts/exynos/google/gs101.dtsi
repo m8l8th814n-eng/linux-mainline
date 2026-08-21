@@ -535,12 +535,24 @@
 		};
 
 		/*
-		 * Must stay "no-map": the AoC driver claims this range with
+		 * 52 MB, not 48. The AoC firmware image carries its own iommu
+		 * table, and it asks for two physically adjacent ranges:
+		 *
+		 *   va 0x98000000 -> pa 0x94000000  0x3000000
+		 *   va 0x9b000000 -> pa 0x97000000  0x0400000
+		 *
+		 * 0x94000000 + 0x3000000 is 0x97000000, so the firmware expects
+		 * one contiguous 0x3400000 region. Reserving only 0x3000000
+		 * leaves the last 4 MB as ordinary kernel memory, which AoC then
+		 * writes to -- the machine dies instantly with no panic, because
+		 * the corruption lands in whatever the kernel had there.
+		 *
+		 * Must stay "no-map": the driver claims this range with
 		 * devm_request_mem_region() and maps it with devm_ioremap_wc(),
 		 * which requires the memory to be outside System RAM.
 		 */
 		aoc_reserve: aoc@94000000 {
-			reg = <0x0 0x94000000 0x03000000>;
+			reg = <0x0 0x94000000 0x03400000>;
 			no-map;
 		};
 
@@ -2019,6 +2031,38 @@
 				      "aclk_dma", "aclk_dpp";
 
 			decon,id = <0>;
+		};
+
+		/*
+		 * DPP L0, the first of six display pre-processors. Each is a
+		 * fetch DMA plus a pixel pipeline, and becomes one DRM plane.
+		 * L1-L5 follow at 0x1000 strides from both bases; only L0 is
+		 * described here because one plane is enough to scan out.
+		 *
+		 * Clocks are the same DPU set DECON uses -- both blocks sit
+		 * behind cmu_dpu, and DECON only enables them long enough to
+		 * read its version register, so DPP cannot rely on them being
+		 * on.
+		 *
+		 * No interrupts property: L0 has a DMA and a DPP interrupt,
+		 * but their SPI numbers are not established, and the driver
+		 * does not request them yet. Better absent than guessed.
+		 */
+		dpp0: dpp@1c0b0000 {
+			compatible = "google,gs101-dpp";
+			reg = <0x1c0b0000 0x1000>,
+			      <0x1c0d0000 0x1000>;
+			reg-names = "dma", "dpp";
+
+			clocks = <&cmu_dpu CLK_GOUT_DPU_PCLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_CLK_DPU_BUSP_CLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_CLK_DPU_BUSD_CLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_DPUF_ACLK_DMA>,
+				 <&cmu_dpu CLK_GOUT_DPU_DPUF_ACLK_DPP>;
+			clock-names = "pclk", "busp", "busd",
+				      "aclk_dma", "aclk_dpp";
+
+			dpp,id = <0>;
 		};
 
 		cmu_top: clock-controller@1e080000 {

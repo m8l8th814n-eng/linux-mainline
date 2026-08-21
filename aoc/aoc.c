@@ -110,6 +110,40 @@ static bool aoc_autoload_firmware = false;
 module_param(aoc_autoload_firmware, bool, 0644);
 MODULE_PARM_DESC(aoc_autoload_firmware, "Automatically load firmware if true");
 
+/*
+ * Loading firmware wedges the SoC hard -- no panic, no console, not even the
+ * USB gadget survives. That is what a stalled bus transaction looks like, and
+ * it takes the kernel log with it, so there is no way to see how far it got.
+ *
+ * This walks the boot sequence in stages instead. Set the parameter, trigger
+ * a firmware load, and see whether the machine survives. The first stage that
+ * hangs is the one containing the offending access.
+ *
+ *   0  stop before request_aoc_on()      -- touches nothing in AoC space
+ *   1  after request_aoc_on()            -- first write to the aoc_req block
+ *   2  after _aoc_fw_commit()            -- 15 MB memcpy into the carveout
+ *   3  after aoc_configure_iommu()       -- page tables, no AoC access
+ *   4  after write_reset_trampoline()    -- writes into AoC SRAM
+ *   5  after aoc_pass_fw_information()
+ *   6  run to completion, releasing AoC from reset
+ *
+ * Default 0: safe, does nothing, proves the mechanism works.
+ */
+static int aoc_stop_at = 0;
+module_param(aoc_stop_at, int, 0644);
+MODULE_PARM_DESC(aoc_stop_at,
+		 "Stop the firmware boot sequence after stage N (0-6, default 0)");
+
+#define AOC_STAGE(n, what)						\
+	do {								\
+		if (aoc_stop_at < (n)) {				\
+			dev_warn(dev, "aoc_stop_at=%d: stopping before %s\n", \
+				 aoc_stop_at, what);			\
+			goto free_fw;					\
+		}							\
+		dev_info(dev, "stage %d: %s\n", (n), what);		\
+	} while (0)
+
 static bool aoc_disable_restart = false;
 module_param(aoc_disable_restart, bool, 0644);
 MODULE_PARM_DESC(aoc_disable_restart, "Prevent AoC from restarting after crashing.");
@@ -557,7 +591,40 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 			fw_data[i].value = board_rev;
 	}
 
+	AOC_STAGE(1, "request_aoc_on()");
 	request_aoc_on(prvdata, true);
+
+	/*
+	 * Wait for the power controller to acknowledge before touching
+	 * anything in AoC's own address space.
+	 *
+	 * The original code fired the request and carried straight on to
+	 * write_reset_trampoline(), which writes into AoC SRAM at 0x19000000.
+	 * If the block is not up yet that access never completes and takes the
+	 * interconnect with it -- the machine dies instantly, no panic, no log.
+	 * The aoc_stop_at staging showed exactly that: stage 1 (aoc_req at
+	 * 0x175d0000) is fine, stage 4 (AoC SRAM) is not.
+	 *
+	 * The driver already does request-then-wait elsewhere, so this only
+	 * brings the firmware path in line with the rest of it.
+	 */
+	/*
+	 * Log the raw ack register too. wait_for_aoc_status() returning 0 does
+	 * not distinguish "the block came up" from "the bit was already set and
+	 * we never actually waited" -- and stage 4 hangs either way, so the
+	 * difference matters.
+	 */
+	dev_info(dev, "aoc_req ack before wait: %#x\n",
+		 readl(prvdata->aoc_req_virt + 0x40));
+
+	if (wait_for_aoc_status(prvdata, true)) {
+		dev_err(dev, "timed out waiting for AoC power-on ack (raw %#x)\n",
+			readl(prvdata->aoc_req_virt + 0x40));
+		goto free_fw;
+	}
+
+	dev_info(dev, "AoC power-on acknowledged, ack now %#x\n",
+		 readl(prvdata->aoc_req_virt + 0x40));
 
 	if (!fw->data) {
 		dev_err(dev, "firmware image contains no data\n");
@@ -613,7 +680,10 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	aoc_control = aoc_dram_translate(prvdata, ipc_offset);
 
 	{
-		bool commit_rc = _aoc_fw_commit(fw, aoc_dram_virt_mapping + AOC_BINARY_DRAM_OFFSET);
+		bool commit_rc;
+
+		AOC_STAGE(2, "_aoc_fw_commit()");
+		commit_rc = _aoc_fw_commit(fw, aoc_dram_virt_mapping + AOC_BINARY_DRAM_OFFSET);
 		if (!commit_rc) {
 			dev_err(dev, "FW commit failed!\n");
 		}
@@ -630,10 +700,14 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 			goto free_fw;
 		}
 	} else {
+		AOC_STAGE(3, "aoc_configure_iommu()");
 		aoc_configure_iommu(prvdata, fw);
+
+		AOC_STAGE(4, "write_reset_trampoline()");
 		write_reset_trampoline(fw);
 	}
 
+	AOC_STAGE(5, "aoc_pass_fw_information()");
 	aoc_pass_fw_information(aoc_dram_translate(prvdata, ipc_offset),
 			fw_data, ARRAY_SIZE(fw_data));
 
@@ -651,6 +725,10 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 			dev_err(dev, "GSA: Failed to start AOC: %d\n", rc);
 			goto free_fw;
 		}
+	} else if (aoc_stop_at < 6) {
+		dev_warn(dev, "aoc_stop_at=%d: not releasing AoC from reset\n",
+			 aoc_stop_at);
+		goto free_fw;
 	} else {
 		aoc_release_from_reset(prvdata);
 	}
@@ -1241,11 +1319,39 @@ static void aoc_configure_iommu(struct aoc_prvdata *p, const struct firmware *fw
 
 	memcpy(p->iommu, iommu, iommu_size);
 
+	dev_info(dev, "iommu table: %zu entries\n", cnt);
+
 	for (i = 0; i < cnt; i++) {
+		u64 va = IOMMU_VADDR(iommu[i].value);
+		u64 pa = IOMMU_PADDR(iommu[i].value);
+		u64 sz = IOMMU_SIZE(iommu[i].value);
+		phys_addr_t back;
+
 		rc = iommu_map(domain, IOMMU_VADDR(iommu[i].value),
 						IOMMU_PADDR(iommu[i].value),
 						IOMMU_SIZE(iommu[i].value),
 						IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+
+		/*
+		 * Diagnostic: iommu_map() returning 0 is not proof the page
+		 * table was populated. iotlb_sync_map() has been seen walking
+		 * into empty level-1 entries inside a range this call reported
+		 * as mapped, which is the leading suspect for AoC faulting and
+		 * stalling the bus once it is released from reset. Read the
+		 * translation back and say so when it disagrees.
+		 */
+		if (!rc) {
+			back = iommu_iova_to_phys(domain, va);
+			if (back != (phys_addr_t)pa)
+				dev_err(dev,
+					"iommu[%zu]: va 0x%llx -> pa 0x%llx size 0x%llx, but reads back 0x%pa\n",
+					i, va, pa, sz, &back);
+			else
+				dev_info(dev,
+					 "iommu[%zu]: va 0x%llx -> pa 0x%llx size 0x%llx ok\n",
+					 i, va, pa, sz);
+		}
+
 		if (rc < 0) {
 			dev_err(
 				dev,
@@ -2805,3 +2911,11 @@ module_exit(aoc_exit);
 MODULE_LICENSE("GPL v2");
 MODULE_IMPORT_NS("DMA_BUF");
 MODULE_IMPORT_NS("DMA_BUF_HEAP");
+
+/*
+ * Both are real probe-time dependencies, but neither is a symbol dependency, so
+ * modprobe has no way to infer the order. Without this AoC probes first, defers
+ * on the mailbox, and only binds on a retry once the SysMMU has registered --
+ * which makes the IOMMU core warn about a late probe at driver bind.
+ */
+MODULE_SOFTDEP("pre: samsung-iommu mailbox-wc");

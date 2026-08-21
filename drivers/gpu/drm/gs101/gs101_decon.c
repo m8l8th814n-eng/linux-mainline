@@ -23,6 +23,7 @@
  * Each of those is additive once a picture appears.
  */
 
+#include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/interrupt.h>
@@ -46,6 +47,40 @@ static const struct component_ops gs101_decon_component_ops;
 
 /* regs-decon.h: main bank offset 0, read-only hardware version. */
 #define DECON_VERSION		0x0000
+
+/*
+ * regs-decon.h:97. Selects what triggers a frame transfer to the panel.
+ *
+ * This is the one register on this block whose correct value is known from
+ * running hardware rather than read out of vendor source: postmarketOS ships
+ * an initramfs hook (/usr/share/mkinitfs/hooks/00-enable-fb.sh) that pokes
+ * 0x3061 here through devmem2, and without it the bootloader framebuffer
+ * never refreshes.
+ */
+#define DECON_TRIG_CON			0x0030
+#define  HW_TRIG_ACTIVE_VALUE		BIT(13)
+#define  HW_TRIG_EDGE_POLARITY		BIT(12)
+#define  HW_TRIG_MASK_SLAVE1		BIT(6)
+#define  HW_TRIG_MASK_SLAVE0		BIT(5)
+#define  HW_TRIG_MASK_DECON		BIT(4)
+#define  HW_TRIG_EN			BIT(0)
+
+/*
+ * 0x3061, spelled out. The bootloader leaves 0x3070 -- same polarity and slave
+ * masks, but DECON masked off and the trigger disabled -- so enabling scanout
+ * means clearing HW_TRIG_MASK_DECON and setting HW_TRIG_EN.
+ *
+ * That the panel needs a hardware trigger at all is itself the finding: only a
+ * command-mode DSI panel does, because DECON waits for the panel's TE signal
+ * before each transfer. A video-mode panel would free-run. So the operation
+ * mode is settled, and atomic_flush has to kick a transfer per commit rather
+ * than rely on a continuous vsync.
+ */
+#define DECON_TRIG_CON_HW_TRIGGER	(HW_TRIG_ACTIVE_VALUE | \
+					 HW_TRIG_EDGE_POLARITY | \
+					 HW_TRIG_MASK_SLAVE1 | \
+					 HW_TRIG_MASK_SLAVE0 | \
+					 HW_TRIG_EN)
 
 /*
  * DECON0 register banks, from the vendor device tree (gs101-drm-dpu.dtsi):
@@ -135,10 +170,22 @@ static int gs101_decon_hw_init(struct gs101_decon *decon)
 	return -EOPNOTSUPP;
 }
 
-/* TODO: decon_reg_start() (decon_reg.c:1872) */
+/*
+ * TODO: the rest of decon_reg_start() (decon_reg.c:1872) -- it also requests a
+ * shadow-register update and unmasks the trigger via
+ * decon_reg_update_req_global(). Enabling the trigger is only the last step.
+ *
+ * What is here is exactly what the initramfs hook does, and no more. It is
+ * correct as far as it goes but cannot produce a picture on its own: without
+ * hw_init() having configured the operation mode, blender size and LCD timing,
+ * there is nothing for the trigger to transfer.
+ */
 static int gs101_decon_hw_start(struct gs101_decon *decon)
 {
-	return -EOPNOTSUPP;
+	writel(DECON_TRIG_CON_HW_TRIGGER,
+	       decon->regs[DECON_REG_MAIN] + DECON_TRIG_CON);
+
+	return 0;
 }
 
 /* TODO: decon_reg_stop() (decon_reg.c:1902) */

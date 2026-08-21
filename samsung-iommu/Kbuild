@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Trimmed from the vendor google-modules/soc/gs Kbuild.
+#
+# gs101 uses SysMMU v8: its device tree declares 29 nodes with
+# compatible = "samsung,sysmmu-v8" and none with v9. The v9 driver is for
+# gs201/zuma and is not built here. The PCIe IOMMU wrappers, secure IOVA and
+# the best-fit IOVA allocator are left out as well.
+#
+# The CONFIG_SAMSUNG_IOMMU_* symbols are passed on the make command line
+# because this Kconfig is not sourced from the main kernel Kconfig tree.
+
+# Stubs for vendor headers with no mainline equivalent, shared with aoc.
+ccflags-y				+= -I$(srctree)/vendor-stub-include
+
+obj-$(CONFIG_SAMSUNG_IOMMU)		+= samsung_iommu.o
+samsung_iommu-objs			+= samsung-iommu.o samsung-iommu-fault.o
+
+obj-$(CONFIG_SAMSUNG_IOMMU_GROUP)	+= samsung-iommu-group.o

@@ -242,6 +242,12 @@ static const struct panfrost_model gpu_models[] = {
 	/* MediaTek MT8188 Mali-G57 MC3 */
 	GPU_MODEL(g57, 0x9093,
 		GPU_REV(g57, 0, 0)),
+
+	/* Google Tensor (gs101) Mali-G78 MP20. The GPU reports ID 0x9202, but
+	 * panfrost_model_cmp() masks any ID with bits in 0xf000 down to 0xf00f
+	 * before comparing, so the table entry has to be the masked value.
+	 */
+	GPU_MODEL(g78, 0x9002),
 	{0},
 };
 

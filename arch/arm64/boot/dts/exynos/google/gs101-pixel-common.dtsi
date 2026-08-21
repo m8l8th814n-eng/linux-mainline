@@ -93,6 +93,20 @@
 		enable-active-high;
 	};
 
+	/*
+	 * WLAN power enable (BCM4389 on PCIe HSI2). The vendor "wl_reg_on"
+	 * GPIO; drive it on so the endpoint is powered before the PCIe link
+	 * trains. always-on because there is no bcmdhd driver to toggle it.
+	 */
+	wlan_pwrseq: regulator-wlan {
+		compatible = "regulator-fixed";
+		regulator-name = "wlan-en";
+		gpio = <&gpp14 2 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
 	reserved-memory {
 		cont_splash_mem: splash@fac00000 {
 			/* size to be updated by actual board */
@@ -807,6 +821,19 @@
 };
 
 &pinctrl_far_alive {
+	/*
+	 * gpa8 belongs to this controller, not pinctrl_gpio_alive where this
+	 * node used to sit. Declared there, the group was never registered
+	 * ("174d0000.pinctrl: does not have pin group gpa8-6") and the AoC
+	 * interrupt line was left unconfigured.
+	 */
+	aoc2ap_irq: aoc2ap-irq {
+		samsung,pins = "gpa8-6";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_DOWN>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+
 	key_voldown: key-voldown-pins {
 		samsung,pins = "gpa7-3";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
@@ -866,12 +893,6 @@
 		samsung,pins = "gpa9-0";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
-		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
-	};
-	aoc2ap_irq: aoc2ap-irq {
-		samsung,pins = "gpa8-6";
-		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
-		samsung,pin-pud = <GS101_PIN_PULL_DOWN>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
 	};
 };
@@ -997,5 +1018,105 @@
 			samsung,spi-chip-select-mode = <0>;
 			cs-clock-delay = <2>;
 		};
+	};
+};
+
+/*
+ * CS35L41 speaker amplifiers on SPI13 (USI13). Pin assignments taken from
+ * the vendor kernel (gs101-raviole-audio.dtsi). This only gets the amps to
+ * probe on the SPI bus; there is no DAI link or sound card yet, so it does
+ * not produce audio on its own.
+ */
+&pinctrl_gpio_alive {
+	cs35l41_r_irq: cs35l41-r-irq-pins {
+		samsung,pins = "gpa9-6"; /* XEINT_26 */
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_far_alive {
+	cs35l41_l_irq: cs35l41-l-irq-pins {
+		samsung,pins = "gpa6-3"; /* XEINT_3 */
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_peric0 {
+	cs35l41_l_rst: cs35l41-l-rst-pins {
+		samsung,pins = "gpp16-3"; /* XAPC_USI8_CTSN_CSN */
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+
+	cs35l41_cs2: cs35l41-cs2-pins {
+		samsung,pins = "gpp1-0"; /* XAPC_GPIO2 */
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_peric1 {
+	cs35l41_r_rst: cs35l41-r-rst-pins {
+		samsung,pins = "gpp23-7"; /* XAPC_USI12_CTSN_CSN */
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+};
+
+&spi_13 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi13_bus>, <&spi13_cs>, <&cs35l41_cs2>;
+
+	/* Both chip selects are driven as GPIOs, so gpp25-3 uses spi13_cs
+	 * (output function) rather than spi13_cs_func (SPI function).
+	 */
+	cs-gpios = <&gpp25 3 GPIO_ACTIVE_LOW>, <&gpp1 0 GPIO_ACTIVE_LOW>;
+	num-cs = <2>;
+
+	cs35l41_l: speaker-amp@0 {
+		compatible = "cirrus,cs35l41";
+		reg = <0>;
+		#sound-dai-cells = <1>;
+		cirrus,subsystem-id = "oriole";
+		spi-max-frequency = <11000000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cs35l41_l_irq>, <&cs35l41_l_rst>;
+
+		interrupt-parent = <&gpa6>;
+		interrupts = <3 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
+
+		cirrus,boost-peak-milliamp = <3500>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <30>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,left-channel-amp;
+	};
+
+	cs35l41_r: speaker-amp@1 {
+		compatible = "cirrus,cs35l41";
+		reg = <1>;
+		#sound-dai-cells = <1>;
+		cirrus,subsystem-id = "oriole";
+		spi-max-frequency = <11000000>;
+		sound-name-prefix = "R";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cs35l41_r_irq>, <&cs35l41_r_rst>;
+
+		interrupt-parent = <&gpa9>;
+		interrupts = <6 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gpp23 7 GPIO_ACTIVE_HIGH>;
+
+		cirrus,boost-peak-milliamp = <3500>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <30>;
+		cirrus,asp-sdout-hiz = <3>;
 	};
 };

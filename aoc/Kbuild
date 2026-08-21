@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0
+
+# aoc_ipc lives next to this module inside the kernel tree, not in the vendor
+# google-modules layout. The samsung dma-buf heaps and trusty include paths are
+# gone: ion_physical_heap.c is reimplemented on the plain dma-heap API, and
+# nothing here actually includes a trusty header.
+ccflags-y	+= -I$(srctree)/aoc_ipc
+ccflags-y	+= -I$(srctree)/drivers/dma-buf
+# Stubs for vendor headers with no mainline equivalent; see each for why.
+# Shared with the other ported vendor modules under the tree root.
+ccflags-y	+= -I$(srctree)/vendor-stub-include
+
+# aoc-interface.h picks its platform header off this and #errors without it.
+# gs101 is the only target here.
+ccflags-y	+= -DCONFIG_SOC_GS101=1
+
+obj-$(CONFIG_WC_MBOX)			+= mailbox-wc.o
+
+obj-$(CONFIG_AOC_DRIVER)		+= aoc_core.o
+aoc_core-objs	:= aoc.o ../aoc_ipc/aoc_ipc_core.o aoc_firmware.o ion_physical_heap.o aoc_service_core.o
+# CONFIG_SOC_GS101/GS201/ZUMA are downstream Kconfig symbols that do not exist
+# in mainline. gs101 is the only target here, and it needs aoc_v1.
+aoc_core-objs	+= aoc_v1.o
+
+obj-$(CONFIG_AOC_CHAR_DRIVER)		+= aoc_char_dev.o
+obj-$(CONFIG_AOC_CONTROL_DRIVER)	+= aoc_control_dev.o
+obj-$(CONFIG_AOC_CHAN_DRIVER)		+= aoc_channel_dev.o
+obj-$(CONFIG_AOC_UWB_DRIVER)		+= aoc_uwb_platform_drv.o aoc_uwb_service_dev.o
+obj-$(CONFIG_AOC_TBN_DRIVER)		+= aoc_tbn_service_dev.o
+obj-$(CONFIG_AOC_UNIT_TEST_DRIVER) 	+= aoc_unit_test_dev.o
+
+headers-y	:= uapi/aoc.h

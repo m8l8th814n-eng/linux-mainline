@@ -157,6 +157,15 @@ struct sbconfig {
 #define SRCI_LSS_SHIFT		20
 #define	SRCI_SRNB_MASK		0xf0
 #define	SRCI_SRNB_MASK_EXT	0x100
+/* SYSMEM core bank counts (distinct from SOCRAM SRCI_SRNB_*) */
+#define	SYSMEM_SRCI_ROMNB_MASK		0x3e0
+#define	SYSMEM_SRCI_ROMNB_SHIFT		5
+#define	SYSMEM_SRCI_SRNB_MASK		0x1f
+#define	SYSMEM_SRCI_SRNB_SHIFT		0
+#define	SYSMEM_SRCI_NEW_ROMNB_MASK	0xff000000
+#define	SYSMEM_SRCI_NEW_ROMNB_SHIFT	24
+#define	SYSMEM_SRCI_NEW_SRNB_MASK	0x00ff0000
+#define	SYSMEM_SRCI_NEW_SRNB_SHIFT	16
 #define	SRCI_SRNB_SHIFT		4
 #define	SRCI_SRBSZ_MASK		0xf
 #define	SRCI_SRBSZ_SHIFT	0
@@ -660,19 +669,60 @@ static u32 brcmf_chip_sysmem_ramsize(struct brcmf_core_priv *sysmem)
 	u32 coreinfo;
 	u32 idx;
 	u32 nb;
+	u32 nrb;
 	u32 banksize;
 
-	if (!brcmf_chip_iscoreup(&sysmem->pub))
-		brcmf_chip_resetcore(&sysmem->pub, 0, 0, 0);
+	/*
+	 * The SYSMEM core may report "up" while its registers still read back
+	 * all-ones (seen on BCM4389 after a driver reload). Reset it and retry
+	 * until coreinfo is valid, mirroring the vendor si_sysmem_size() reset
+	 * loop, otherwise the bank counts come out as garbage.
+	 */
+	for (idx = 0; idx < 5; idx++) {
+		if (!brcmf_chip_iscoreup(&sysmem->pub))
+			brcmf_chip_resetcore(&sysmem->pub, 0, 0, 0);
 
-	coreinfo = brcmf_chip_core_read32(sysmem, SYSMEMREGOFFS(coreinfo));
-	nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
+		coreinfo = brcmf_chip_core_read32(sysmem,
+						  SYSMEMREGOFFS(coreinfo));
+		if (coreinfo != 0xffffffff)
+			break;
+
+		brcmf_chip_resetcore(&sysmem->pub, 0, 0, 0);
+		udelay(10);
+	}
+
+	/*
+	 * The SYSMEM core has its own bank-count fields, distinct from the
+	 * SOCRAM SRCI_SRNB_* layout, and the RAM banks follow the ROM banks
+	 * which must be skipped. Getting this wrong (e.g. reusing the SOCRAM
+	 * mask) undersizes the RAM and firmware download fails. Matches the
+	 * vendor si_sysmem_size().
+	 */
+	if (sysmem->pub.rev < 12) {
+		nrb = (coreinfo & SYSMEM_SRCI_ROMNB_MASK) >>
+		      SYSMEM_SRCI_ROMNB_SHIFT;
+		nb = (coreinfo & SYSMEM_SRCI_SRNB_MASK) >>
+		     SYSMEM_SRCI_SRNB_SHIFT;
+	} else {
+		nrb = (coreinfo & SYSMEM_SRCI_NEW_ROMNB_MASK) >>
+		      SYSMEM_SRCI_NEW_ROMNB_SHIFT;
+		nb = (coreinfo & SYSMEM_SRCI_NEW_SRNB_MASK) >>
+		     SYSMEM_SRCI_NEW_SRNB_SHIFT;
+	}
 
 	for (idx = 0; idx < nb; idx++) {
-		brcmf_chip_socram_banksize(sysmem, idx, &banksize);
+		u32 bi;
+
+		brcmf_chip_core_write32(sysmem, SYSMEMREGOFFS(bankidx),
+					idx + nrb);
+		bi = brcmf_chip_core_read32(sysmem, SYSMEMREGOFFS(bankinfo));
+		banksize = ((bi & SOCRAM_BANKINFO_SZMASK) + 1) *
+			   SOCRAM_BANKINFO_SZBASE;
 		memsize += banksize;
 	}
 
+	brcmf_dbg(INFO, "SYSMEM coreinfo=0x%08x rev=%d nrb=%d nb=%d ramsize=0x%x\n",
+		  coreinfo, sysmem->pub.rev, nrb, nb, memsize);
 	return memsize;
 }
 
@@ -746,6 +796,8 @@ static u32 brcmf_chip_tcm_rambase(struct brcmf_chip_priv *ci)
 		return 0x352000;
 	case BRCM_CC_4387_CHIP_ID:
 		return 0x740000;
+	case BRCM_CC_4389_CHIP_ID:
+		return 0x200000;
 	default:
 		brcmf_err("unknown chip: %s\n", ci->pub.name);
 		break;

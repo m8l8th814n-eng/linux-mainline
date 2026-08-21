@@ -71,6 +71,7 @@ BRCMF_FW_CLM_DEF(4377B3, "brcmfmac4377b3-pcie");
 BRCMF_FW_CLM_DEF(4378B1, "brcmfmac4378b1-pcie");
 BRCMF_FW_CLM_DEF(4378B3, "brcmfmac4378b3-pcie");
 BRCMF_FW_CLM_DEF(4387C2, "brcmfmac4387c2-pcie");
+BRCMF_FW_CLM_DEF(4389B1, "brcmfmac4389b1-pcie");
 BRCMF_FW_CLM_DEF(54591, "brcmfmac54591-pcie");
 
 /* firmware config files */
@@ -112,6 +113,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0x0000000F, 4378B1), /* revision ID 3 */
 	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0xFFFFFFE0, 4378B3), /* revision ID 5 */
 	BRCMF_FW_ENTRY(BRCM_CC_4387_CHIP_ID, 0xFFFFFFFF, 4387C2), /* revision ID 7 */
+	BRCMF_FW_ENTRY(BRCM_CC_4389_CHIP_ID, 0xFFFFFFFF, 4389B1),
 };
 
 #define BRCMF_PCIE_FW_UP_TIMEOUT		5000 /* msec */
@@ -122,6 +124,12 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define	BRCMF_PCIE_BAR0_WINDOW			0x80
 #define BRCMF_PCIE_BAR0_REG_SIZE		0x1000
 #define	BRCMF_PCIE_BAR0_WRAPPERBASE		0x70
+
+/* backplane address space accessed by BAR1 (TCM); the aperture is fixed
+ * (e.g. 4 MB on BCM4389) while dongle RAM can be larger, so this window
+ * register is slid to reach the whole RAM, like the vendor driver does.
+ */
+#define	BRCMF_PCIE_BAR1_WINDOW			0x84
 
 #define BRCMF_PCIE_BAR0_WRAPBASE_DMP_OFFSET	0x1000
 #define BRCMF_PCIE_BARO_PCIE_ENUM_OFFSET	0x2000
@@ -220,6 +228,18 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_PCIE_SHARED_DMA_INDEX		0x10000
 #define BRCMF_PCIE_SHARED_DMA_2B_IDX		0x100000
 #define BRCMF_PCIE_SHARED_HOSTRDY_DB1		0x10000000
+
+/* Host capabilities word (pciedev_shared.host_cap, offset 0x54). Firmware
+ * built for the vendor bcmdhd driver -- e.g. the BCM4389 in Google Tensor
+ * (gs101/Pixel 6) devices -- reads this to learn what the host supports and
+ * traps unless HOSTCAP_UR_FW_NO_TRAP is advertised. Only bits that brcmfmac
+ * actually honors are set (IPC version + hostready); notably NOT H2D
+ * valid-phase or IDMA, which brcmfmac does not implement.
+ */
+#define BRCMF_SHARED_HOST_CAP_OFFSET		0x54
+#define BRCMF_HOSTCAP_PCIEAPI_VERSION_MASK	0x000000ff
+#define BRCMF_HOSTCAP_H2D_ENABLE_HOSTRDY	0x00000400
+#define BRCMF_HOSTCAP_UR_FW_NO_TRAP		0x00800000
 
 #define BRCMF_PCIE_FLAGS_HTOD_SPLIT		0x4000
 #define BRCMF_PCIE_FLAGS_DTOH_SPLIT		0x8000
@@ -339,6 +359,9 @@ struct brcmf_pciedev_info {
 	const struct brcmf_pcie_reginfo *reginfo;
 	void __iomem *regs;
 	void __iomem *tcm;
+	u32 bar1_size;		/* mapped aperture size of the TCM BAR */
+	u32 cur_bar1_win;	/* backplane base currently in the BAR1 window */
+	spinlock_t bar1_lock;	/* serialises BAR1 window moves + TCM access */
 	u32 ram_base;
 	u32 ram_size;
 	struct brcmf_chip *ci;
@@ -494,21 +517,56 @@ brcmf_pcie_write_reg32(struct brcmf_pciedev_info *devinfo, u32 reg_offset,
 }
 
 
+/* Program the BAR1 backplane window so that the (backplane) address
+ * @mem_offset becomes reachable through the fixed TCM aperture, and return
+ * the mapped iomem pointer for it. dongle RAM can extend past the aperture
+ * (e.g. rambase 0x200000 + 2.75 MB on BCM4389 vs a 4 MB BAR), so the window
+ * is slid to whichever aperture-aligned region contains the address. The
+ * access must not straddle a window boundary; callers moving buffers use
+ * brcmf_pcie_copy_*_dev(), which chunk on the aperture. Caller holds
+ * bar1_lock when concurrent access is possible.
+ */
+static void __iomem *
+brcmf_pcie_tcm_addr(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
+{
+	u32 win;
+
+	if (!devinfo->bar1_size)
+		return devinfo->tcm + mem_offset;
+
+	win = mem_offset & ~(devinfo->bar1_size - 1);
+	if (win != devinfo->cur_bar1_win) {
+		pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_BAR1_WINDOW,
+				       win);
+		devinfo->cur_bar1_win = win;
+	}
+	return devinfo->tcm + (mem_offset - win);
+}
+
+
 static u8
 brcmf_pcie_read_tcm8(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
 {
-	void __iomem *address = devinfo->tcm + mem_offset;
+	unsigned long flags;
+	u8 value;
 
-	return (ioread8(address));
+	spin_lock_irqsave(&devinfo->bar1_lock, flags);
+	value = ioread8(brcmf_pcie_tcm_addr(devinfo, mem_offset));
+	spin_unlock_irqrestore(&devinfo->bar1_lock, flags);
+	return value;
 }
 
 
 static u16
 brcmf_pcie_read_tcm16(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
 {
-	void __iomem *address = devinfo->tcm + mem_offset;
+	unsigned long flags;
+	u16 value;
 
-	return (ioread16(address));
+	spin_lock_irqsave(&devinfo->bar1_lock, flags);
+	value = ioread16(brcmf_pcie_tcm_addr(devinfo, mem_offset));
+	spin_unlock_irqrestore(&devinfo->bar1_lock, flags);
+	return value;
 }
 
 
@@ -516,9 +574,11 @@ static void
 brcmf_pcie_write_tcm16(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 		       u16 value)
 {
-	void __iomem *address = devinfo->tcm + mem_offset;
+	unsigned long flags;
 
-	iowrite16(value, address);
+	spin_lock_irqsave(&devinfo->bar1_lock, flags);
+	iowrite16(value, brcmf_pcie_tcm_addr(devinfo, mem_offset));
+	spin_unlock_irqrestore(&devinfo->bar1_lock, flags);
 }
 
 
@@ -544,9 +604,13 @@ brcmf_pcie_write_idx(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 static u32
 brcmf_pcie_read_tcm32(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
 {
-	void __iomem *address = devinfo->tcm + mem_offset;
+	unsigned long flags;
+	u32 value;
 
-	return (ioread32(address));
+	spin_lock_irqsave(&devinfo->bar1_lock, flags);
+	value = ioread32(brcmf_pcie_tcm_addr(devinfo, mem_offset));
+	spin_unlock_irqrestore(&devinfo->bar1_lock, flags);
+	return value;
 }
 
 
@@ -554,18 +618,19 @@ static void
 brcmf_pcie_write_tcm32(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 		       u32 value)
 {
-	void __iomem *address = devinfo->tcm + mem_offset;
+	unsigned long flags;
 
-	iowrite32(value, address);
+	spin_lock_irqsave(&devinfo->bar1_lock, flags);
+	iowrite32(value, brcmf_pcie_tcm_addr(devinfo, mem_offset));
+	spin_unlock_irqrestore(&devinfo->bar1_lock, flags);
 }
 
 
 static u32
 brcmf_pcie_read_ram32(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
 {
-	void __iomem *addr = devinfo->tcm + devinfo->ci->rambase + mem_offset;
-
-	return (ioread32(addr));
+	return brcmf_pcie_read_tcm32(devinfo,
+				     devinfo->ci->rambase + mem_offset);
 }
 
 
@@ -573,49 +638,71 @@ static void
 brcmf_pcie_write_ram32(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 		       u32 value)
 {
-	void __iomem *addr = devinfo->tcm + devinfo->ci->rambase + mem_offset;
-
-	iowrite32(value, addr);
+	brcmf_pcie_write_tcm32(devinfo, devinfo->ci->rambase + mem_offset,
+			       value);
 }
 
 
 static void
+brcmf_pcie_write_tcm8(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
+		      u8 value)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&devinfo->bar1_lock, flags);
+	iowrite8(value, brcmf_pcie_tcm_addr(devinfo, mem_offset));
+	spin_unlock_irqrestore(&devinfo->bar1_lock, flags);
+}
+
+
+/* Copy from dongle TCM (backplane @mem_offset) into host memory. Each element
+ * goes through the single-word accessors, so the BAR1 window is slid and
+ * locked per element -- this transparently spans dongle RAM larger than the
+ * BAR aperture without holding bar1_lock across the whole transfer.
+ */
+static void
 brcmf_pcie_copy_dev_tomem(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 			  void *dstaddr, u32 len)
 {
-	void __iomem *address = devinfo->tcm + mem_offset;
-	__le32 *dst32;
-	__le16 *dst16;
-	u8 *dst8;
+	u8 *dst = dstaddr;
 
-	if (((ulong)address & 4) || ((ulong)dstaddr & 4) || (len & 4)) {
-		if (((ulong)address & 2) || ((ulong)dstaddr & 2) || (len & 2)) {
-			dst8 = (u8 *)dstaddr;
-			while (len) {
-				*dst8 = ioread8(address);
-				address++;
-				dst8++;
-				len--;
-			}
-		} else {
-			len = len / 2;
-			dst16 = (__le16 *)dstaddr;
-			while (len) {
-				*dst16 = cpu_to_le16(ioread16(address));
-				address += 2;
-				dst16++;
-				len--;
-			}
-		}
+	if (!((mem_offset | len) & 3)) {
+		for (; len; len -= 4, mem_offset += 4, dst += 4)
+			put_unaligned_le32(brcmf_pcie_read_tcm32(devinfo,
+								 mem_offset),
+					   dst);
+	} else if (!((mem_offset | len) & 1)) {
+		for (; len; len -= 2, mem_offset += 2, dst += 2)
+			put_unaligned_le16(brcmf_pcie_read_tcm16(devinfo,
+								 mem_offset),
+					   dst);
 	} else {
-		len = len / 4;
-		dst32 = (__le32 *)dstaddr;
-		while (len) {
-			*dst32 = cpu_to_le32(ioread32(address));
-			address += 4;
-			dst32++;
-			len--;
-		}
+		for (; len; len--, mem_offset++, dst++)
+			*dst = brcmf_pcie_read_tcm8(devinfo, mem_offset);
+	}
+}
+
+
+/* Copy from host memory into dongle TCM (backplane @mem_offset), window-aware
+ * in the same way as brcmf_pcie_copy_dev_tomem().
+ */
+static void
+brcmf_pcie_copy_mem_todev(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
+			  const void *srcaddr, u32 len)
+{
+	const u8 *src = srcaddr;
+
+	if (!((mem_offset | len) & 3)) {
+		for (; len; len -= 4, mem_offset += 4, src += 4)
+			brcmf_pcie_write_tcm32(devinfo, mem_offset,
+					       get_unaligned_le32(src));
+	} else if (!((mem_offset | len) & 1)) {
+		for (; len; len -= 2, mem_offset += 2, src += 2)
+			brcmf_pcie_write_tcm16(devinfo, mem_offset,
+					       get_unaligned_le16(src));
+	} else {
+		for (; len; len--, mem_offset++, src++)
+			brcmf_pcie_write_tcm8(devinfo, mem_offset, *src);
 	}
 }
 
@@ -1234,8 +1321,8 @@ static int brcmf_pcie_init_ringbuffers(struct brcmf_pciedev_info *devinfo)
 	u16 max_submissionrings;
 	u16 max_completionrings;
 
-	memcpy_fromio(&ringinfo, devinfo->tcm + devinfo->shared.ring_info_addr,
-		      sizeof(ringinfo));
+	brcmf_pcie_copy_dev_tomem(devinfo, devinfo->shared.ring_info_addr,
+				  &ringinfo, sizeof(ringinfo));
 	if (devinfo->shared.version >= 6) {
 		max_submissionrings = le16_to_cpu(ringinfo.max_submissionrings);
 		max_flowrings = le16_to_cpu(ringinfo.max_flowrings);
@@ -1308,8 +1395,9 @@ static int brcmf_pcie_init_ringbuffers(struct brcmf_pciedev_info *devinfo)
 		ringinfo.d2h_r_idx_hostaddr.high_addr =
 			cpu_to_le32(address >> 32);
 
-		memcpy_toio(devinfo->tcm + devinfo->shared.ring_info_addr,
-			    &ringinfo, sizeof(ringinfo));
+		brcmf_pcie_copy_mem_todev(devinfo,
+					  devinfo->shared.ring_info_addr,
+					  &ringinfo, sizeof(ringinfo));
 		brcmf_dbg(PCIE, "Using host memory indices\n");
 	}
 
@@ -1643,6 +1731,16 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 			devinfo->dma_idx_sz = sizeof(u32);
 	}
 
+	/*
+	 * The BCM4389 bcmdhd firmware livelocks on the H2D rings when the ring
+	 * read/write indices live in host memory (it reads a bogus write index
+	 * and runs off the end of the ring). Force the baseline TCM-index mode
+	 * so the dongle keeps the indices in its own memory, reached through
+	 * the BAR window instead of a host-memory DMA the firmware mishandles.
+	 */
+	if (devinfo->ci->chip == BRCM_CC_4389_CHIP_ID)
+		devinfo->dma_idx_sz = 0;
+
 	addr = sharedram_addr + BRCMF_SHARED_MAX_RXBUFPOST_OFFSET;
 	shared->max_rxbufpost = brcmf_pcie_read_tcm16(devinfo, addr);
 	if (shared->max_rxbufpost == 0)
@@ -1662,6 +1760,27 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 
 	brcmf_dbg(PCIE, "max rx buf post %d, rx dataoffset %d\n",
 		  shared->max_rxbufpost, shared->rx_dataoffset);
+
+	/*
+	 * Advertise host capabilities to bcmdhd-style firmware (BCM4389).
+	 * Without HOSTCAP_UR_FW_NO_TRAP such firmware traps as soon as it
+	 * processes host ring traffic; the negotiated IPC version and the
+	 * hostready doorbell mirror what brcmfmac actually does. This must be
+	 * written before the hostready doorbell is rung.
+	 */
+	if (devinfo->ci->chip == BRCM_CC_4389_CHIP_ID) {
+		u32 host_cap = shared->version &
+			       BRCMF_HOSTCAP_PCIEAPI_VERSION_MASK;
+
+		host_cap |= BRCMF_HOSTCAP_UR_FW_NO_TRAP;
+		if (shared->flags & BRCMF_PCIE_SHARED_HOSTRDY_DB1)
+			host_cap |= BRCMF_HOSTCAP_H2D_ENABLE_HOSTRDY;
+		brcmf_pcie_write_tcm32(devinfo,
+				       sharedram_addr +
+				       BRCMF_SHARED_HOST_CAP_OFFSET,
+				       host_cap);
+		brcmf_dbg(PCIE, "Wrote host_cap 0x%08x\n", host_cap);
+	}
 
 	brcmf_pcie_bus_console_init(devinfo);
 	brcmf_pcie_bus_console_read(devinfo, false);
@@ -1683,7 +1802,8 @@ brcmf_pcie_provide_random_bytes(struct brcmf_pciedev_info *devinfo, u32 address)
 	u8 randbuf[BRCMF_RANDOM_SEED_LENGTH];
 
 	get_random_bytes(randbuf, BRCMF_RANDOM_SEED_LENGTH);
-	memcpy_toio(devinfo->tcm + address, randbuf, BRCMF_RANDOM_SEED_LENGTH);
+	brcmf_pcie_copy_mem_todev(devinfo, address, randbuf,
+				  BRCMF_RANDOM_SEED_LENGTH);
 }
 
 static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
@@ -1704,8 +1824,8 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 		return err;
 
 	brcmf_dbg(PCIE, "Download FW %s\n", devinfo->fw_name);
-	memcpy_toio(devinfo->tcm + devinfo->ci->rambase,
-		    (void *)fw->data, fw->size);
+	brcmf_pcie_copy_mem_todev(devinfo, devinfo->ci->rambase,
+				  fw->data, fw->size);
 
 	resetintr = get_unaligned_le32(fw->data);
 	release_firmware(fw);
@@ -1719,7 +1839,7 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 		brcmf_dbg(PCIE, "Download NVRAM %s\n", devinfo->nvram_name);
 		address = devinfo->ci->rambase + devinfo->ci->ramsize -
 			  nvram_len;
-		memcpy_toio(devinfo->tcm + address, nvram, nvram_len);
+		brcmf_pcie_copy_mem_todev(devinfo, address, nvram, nvram_len);
 		brcmf_fw_nvram_free(nvram);
 
 		if (devinfo->fwseed) {
@@ -1735,8 +1855,8 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 			brcmf_dbg(PCIE, "Download random seed\n");
 
 			address -= sizeof(footer);
-			memcpy_toio(devinfo->tcm + address, &footer,
-				    sizeof(footer));
+			brcmf_pcie_copy_mem_todev(devinfo, address, &footer,
+						  sizeof(footer));
 
 			address -= rand_len;
 			brcmf_pcie_provide_random_bytes(devinfo, address);
@@ -1822,6 +1942,14 @@ static int brcmf_pcie_get_resource(struct brcmf_pciedev_info *devinfo)
 		  devinfo->tcm, (unsigned long long)bar1_addr,
 		  (unsigned int)bar1_size);
 
+	/* dongle RAM (rambase + ramsize) can be larger than this fixed BAR
+	 * aperture, so remember its size and reset the backplane window to 0;
+	 * brcmf_pcie_tcm_addr() then slides it on demand.
+	 */
+	devinfo->bar1_size = (u32)bar1_size;
+	devinfo->cur_bar1_win = 0;
+	pci_write_config_dword(pdev, BRCMF_PCIE_BAR1_WINDOW, 0);
+
 	return 0;
 }
 
@@ -1873,6 +2001,28 @@ static int brcmf_pcie_buscoreprep(void *ctx)
 }
 
 
+static int brcmf_pcie_flr_reset(struct brcmf_pciedev_info *devinfo)
+{
+	struct pci_dev *pdev = devinfo->pdev;
+	int err;
+
+	/* PCIe function level reset for a fully clean chip (see caller). */
+	pci_save_state(pdev);
+	err = pcie_flr(pdev);
+	pci_restore_state(pdev);
+	if (err)
+		return err;
+
+	/* The chip re-runs its ROM bootloader after the reset and the BAR
+	 * window register is cleared, so drop the cached window (the next TCM
+	 * access reprograms it) and give the bootloader time to settle.
+	 */
+	devinfo->cur_bar1_win = 0;
+	msleep(100);
+	return 0;
+}
+
+
 static int brcmf_pcie_buscore_reset(void *ctx, struct brcmf_chip *chip)
 {
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)ctx;
@@ -1880,7 +2030,21 @@ static int brcmf_pcie_buscore_reset(void *ctx, struct brcmf_chip *chip)
 	u32 val, reg;
 
 	devinfo->ci = chip;
-	brcmf_pcie_reset_device(devinfo);
+
+	/*
+	 * The legacy chipcommon watchdog does not fully reset the BCM4389:
+	 * state left by the bootloader or a previous attach makes the
+	 * firmware's D11 core bring-up fail intermittently and breaks driver
+	 * reload (SYSMEM then reads back all-ones). The chip is FLR-capable,
+	 * so prefer a PCIe function level reset for a clean slate, matching
+	 * the vendor bcmdhd dongle-reset path; fall back to the watchdog.
+	 */
+	if (chip->chip != BRCM_CC_4389_CHIP_ID ||
+	    brcmf_pcie_flr_reset(devinfo))
+		brcmf_pcie_reset_device(devinfo);
+
+	/* FLR clears the core select window; point it back at the PCIe core. */
+	brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
 
 	/* reginfo is not ready yet */
 	core = brcmf_chip_get_core(chip, BCMA_CORE_PCIE2);
@@ -2073,6 +2237,11 @@ static int brcmf_pcie_read_otp(struct brcmf_pciedev_info *devinfo)
 		base = 0x113c;
 		words = 0x170;
 		break;
+	case BRCM_CC_4389_CHIP_ID:
+		coreid = BCMA_CORE_GCI;
+		base = 0x113c;
+		words = 0x170;
+		break;
 	default:
 		/* OTP not supported on this chip */
 		return 0;
@@ -2122,6 +2291,14 @@ static int brcmf_pcie_read_otp(struct brcmf_pciedev_info *devinfo)
 	}
 
 	ret = brcmf_pcie_parse_otp(devinfo, (u8 *)otp, 2 * words);
+	if (ret && devinfo->ci->chip == BRCM_CC_4389_CHIP_ID) {
+		/* BCM4389 in gs101 (Pixel 6) ships with a blank OTP; the board
+		 * parameters come from the NVRAM file instead. Don't treat an
+		 * empty/unparseable OTP as fatal, fall back to default firmware.
+		 */
+		brcmf_err(bus, "OTP empty, using default firmware/NVRAM\n");
+		ret = 0;
+	}
 	kfree(otp);
 
 	return ret;
@@ -2461,6 +2638,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return ret;
 
 	devinfo->pdev = pdev;
+	spin_lock_init(&devinfo->bar1_lock);
 	pcie_bus_dev = NULL;
 	devinfo->ci = brcmf_chip_attach(devinfo, pdev->device,
 					&brcmf_pcie_buscore_ops);
@@ -2468,6 +2646,21 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		ret = PTR_ERR(devinfo->ci);
 		devinfo->ci = NULL;
 		goto fail;
+	}
+
+	if (devinfo->ci->chip == BRCM_CC_4389_CHIP_ID) {
+		/* The Samsung gs101 (Pixel 6) PCIe DMA engine cannot drive
+		 * 64-bit bus addresses. Without this the dongle is handed host
+		 * DMA addresses the controller mistranslates, which surfaced as
+		 * h2d livelocks and AXI slave errors to poison addresses right
+		 * after the firmware attaches. Constrain DMA to 36 bits, as the
+		 * vendor bcmdhd driver does (DHD_PCIE_DMA_MASK_FOR_GS101).
+		 */
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
+		if (ret) {
+			dev_err(&pdev->dev, "Failed to set 36-bit DMA mask\n");
+			goto fail;
+		}
 	}
 
 	core = brcmf_chip_get_core(devinfo->ci, BCMA_CORE_PCIE2);
@@ -2750,6 +2943,7 @@ static const struct pci_device_id brcmf_pcie_devid_table[] = {
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4377_DEVICE_ID, WCC_SEED),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4378_DEVICE_ID, WCC_SEED),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_4387_DEVICE_ID, WCC_SEED),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4389_DEVICE_ID, WCC_SEED),
 	BRCMF_PCIE_DEVICE(BRCM_PCIE_43752_DEVICE_ID, WCC_SEED),
 	BRCMF_PCIE_DEVICE(CY_PCIE_54591_DEVICE_ID, CYW),
 	{ /* end: all zeroes */ }

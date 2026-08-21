@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_GS101
+	tristate "DRM support for Google gs101 (Tensor G1)"
+	depends on DRM && OF
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select DRM_KMS_HELPER
+	help
+	  Display support for the Google gs101 SoC used in Pixel 6.
+
+	  This is work in progress: the DECON display controller driver
+	  currently only maps its registers and acquires its clocks, then
+	  fails probe. It does not produce a picture. Enable it to verify
+	  that cmu_dpu hands out the display clocks.
+
+	  If M is selected, the module will be called gs101-drm.

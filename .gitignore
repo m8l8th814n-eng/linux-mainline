@@ -13,7 +13,8 @@
 .*
 *.a
 *.asn1.[ch]
-*.bc
+# *.bc  (commented out: pmbootstrap --src passes .gitignore to rsync, which lacks the
+#       !kernel/time/timeconst.bc negation, so the tracked file gets dropped)
 *.bin
 *.bz2
 *.c.[012]*.*

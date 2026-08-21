@@ -21,6 +21,7 @@
 #define CLKS_NR_APM	(CLK_APM_PLL_DIV16_APM + 1)
 #define CLKS_NR_DPU	(CLK_GOUT_DPU_SYSREG_DPU_PCLK + 1)
 #define CLKS_NR_HSI0	(CLK_GOUT_HSI0_XIU_P_HSI0_ACLK + 1)
+#define CLKS_NR_HSI1	(CLK_GOUT_HSI1_XIU_P_HSI1_ACLK + 1)
 #define CLKS_NR_HSI2	(CLK_GOUT_HSI2_XIU_P_HSI2_ACLK + 1)
 #define CLKS_NR_MISC	(CLK_GOUT_MISC_XIU_D_MISC_ACLK + 1)
 #define CLKS_NR_PERIC0	(CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK + 1)
@@ -2682,6 +2683,232 @@ static const struct samsung_cmu_info hsi0_cmu_info __initconst = {
 	.memclk_offset		= GS101_MEMCLK_OFFSET,
 };
 
+/* ---- CMU_HSI1 ------------------------------------------------------------ */
+
+/* Register Offset definitions for CMU_HSI1 (0x11800000) */
+#define PLL_CON0_MUX_CLKCMU_HSI1_BUS_USER					0x0600
+#define PLL_CON1_MUX_CLKCMU_HSI1_BUS_USER					0x0604
+#define PLL_CON0_MUX_CLKCMU_HSI1_PCIE_USER					0x0610
+#define PLL_CON1_MUX_CLKCMU_HSI1_PCIE_USER					0x0614
+#define HSI1_CMU_HSI1_CONTROLLER_OPTION						0x0800
+#define CLK_CON_GAT_HSI1_CMU_HSI1_PCLK						0x2000
+#define CLK_CON_GAT_HSI1_SSMT_PCIE_IA_GEN4A_ACLK				0x2004
+#define CLK_CON_GAT_HSI1_SSMT_PCIE_IA_GEN4A_PCLK				0x2008
+#define CLK_CON_GAT_HSI1_D_TZPC_PCLK						0x2014
+#define CLK_CON_GAT_HSI1_GPC_PCLK						0x2018
+#define CLK_CON_GAT_HSI1_GPIO_PCLK						0x201c
+#define CLK_CON_GAT_HSI1_LHM_AXI_P_I_CLK					0x2020
+#define CLK_CON_GAT_HSI1_LHS_ACEL_D_I_CLK					0x2024
+#define CLK_CON_GAT_HSI1_PCIE_GEN4A_DBI_ACLK					0x2028
+#define CLK_CON_GAT_HSI1_PCIE_GEN4A_MSTR_ACLK					0x202c
+#define CLK_CON_GAT_HSI1_PCIE_GEN4A_SLV_ACLK					0x2030
+#define CLK_CON_GAT_HSI1_PCIE_GEN4A_DRIVER_APB_CLK				0x2034
+#define CLK_CON_GAT_HSI1_PCIE_GEN4A_PHY_REFCLK_IN				0x2038
+#define CLK_CON_GAT_HSI1_PCIE_PCS_PMA_PHY_UDBG_APB_PCLK				0x2050
+#define CLK_CON_GAT_HSI1_PCIE_PCS_PMA_PIPE_PAL_APB_PCLK				0x2054
+#define CLK_CON_GAT_HSI1_PCIE_PCS_PMA_QCH_TM_APB_PCLK				0x2058
+#define CLK_CON_GAT_HSI1_PCIE_IA_GEN4A_I_CLK					0x205c
+#define CLK_CON_GAT_HSI1_PPMU_ACLK						0x2064
+#define CLK_CON_GAT_HSI1_PPMU_PCLK						0x2068
+#define CLK_CON_GAT_HSI1_QE_PCIE_GEN4A_ACLK					0x206c
+#define CLK_CON_GAT_HSI1_QE_PCIE_GEN4A_PCLK					0x2070
+#define CLK_CON_GAT_HSI1_RSTNSYNC_CLK_BUS					0x207c
+#define CLK_CON_GAT_HSI1_RSTNSYNC_CLK_OSCCLK					0x2080
+#define CLK_CON_GAT_HSI1_SSMT_ACLK						0x2084
+#define CLK_CON_GAT_HSI1_SSMT_PCLK						0x2088
+#define CLK_CON_GAT_HSI1_SYSMMU_CLK_S2						0x208c
+#define CLK_CON_GAT_HSI1_SYSREG_PCLK						0x2090
+#define CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_DBI_ACLK				0x2094
+#define CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_DBI_PCLK				0x2098
+#define CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_SLV_ACLK				0x209c
+#define CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_SLV_PCLK				0x20a0
+#define CLK_CON_GAT_HSI1_XIU_D_ACLK						0x20b4
+#define CLK_CON_GAT_HSI1_XIU_P_ACLK						0x20b8
+
+static const unsigned long hsi1_clk_regs[] __initconst = {
+	PLL_CON0_MUX_CLKCMU_HSI1_BUS_USER,
+	PLL_CON1_MUX_CLKCMU_HSI1_BUS_USER,
+	PLL_CON0_MUX_CLKCMU_HSI1_PCIE_USER,
+	PLL_CON1_MUX_CLKCMU_HSI1_PCIE_USER,
+	HSI1_CMU_HSI1_CONTROLLER_OPTION,
+	CLK_CON_GAT_HSI1_CMU_HSI1_PCLK,
+	CLK_CON_GAT_HSI1_SSMT_PCIE_IA_GEN4A_ACLK,
+	CLK_CON_GAT_HSI1_SSMT_PCIE_IA_GEN4A_PCLK,
+	CLK_CON_GAT_HSI1_D_TZPC_PCLK,
+	CLK_CON_GAT_HSI1_GPC_PCLK,
+	CLK_CON_GAT_HSI1_GPIO_PCLK,
+	CLK_CON_GAT_HSI1_LHM_AXI_P_I_CLK,
+	CLK_CON_GAT_HSI1_LHS_ACEL_D_I_CLK,
+	CLK_CON_GAT_HSI1_PCIE_GEN4A_DBI_ACLK,
+	CLK_CON_GAT_HSI1_PCIE_GEN4A_MSTR_ACLK,
+	CLK_CON_GAT_HSI1_PCIE_GEN4A_SLV_ACLK,
+	CLK_CON_GAT_HSI1_PCIE_GEN4A_DRIVER_APB_CLK,
+	CLK_CON_GAT_HSI1_PCIE_GEN4A_PHY_REFCLK_IN,
+	CLK_CON_GAT_HSI1_PCIE_PCS_PMA_PHY_UDBG_APB_PCLK,
+	CLK_CON_GAT_HSI1_PCIE_PCS_PMA_PIPE_PAL_APB_PCLK,
+	CLK_CON_GAT_HSI1_PCIE_PCS_PMA_QCH_TM_APB_PCLK,
+	CLK_CON_GAT_HSI1_PCIE_IA_GEN4A_I_CLK,
+	CLK_CON_GAT_HSI1_PPMU_ACLK,
+	CLK_CON_GAT_HSI1_PPMU_PCLK,
+	CLK_CON_GAT_HSI1_QE_PCIE_GEN4A_ACLK,
+	CLK_CON_GAT_HSI1_QE_PCIE_GEN4A_PCLK,
+	CLK_CON_GAT_HSI1_RSTNSYNC_CLK_BUS,
+	CLK_CON_GAT_HSI1_RSTNSYNC_CLK_OSCCLK,
+	CLK_CON_GAT_HSI1_SSMT_ACLK,
+	CLK_CON_GAT_HSI1_SSMT_PCLK,
+	CLK_CON_GAT_HSI1_SYSMMU_CLK_S2,
+	CLK_CON_GAT_HSI1_SYSREG_PCLK,
+	CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_DBI_ACLK,
+	CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_DBI_PCLK,
+	CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_SLV_ACLK,
+	CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_SLV_PCLK,
+	CLK_CON_GAT_HSI1_XIU_D_ACLK,
+	CLK_CON_GAT_HSI1_XIU_P_ACLK,
+};
+
+PNAME(mout_hsi1_bus_user_p)	= { "oscclk", "dout_cmu_hsi1_bus" };
+PNAME(mout_hsi1_pcie_user_p)	= { "oscclk", "dout_cmu_hsi1_pcie" };
+
+static const struct samsung_mux_clock hsi1_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_HSI1_BUS_USER, "mout_hsi1_bus_user", mout_hsi1_bus_user_p,
+	    PLL_CON0_MUX_CLKCMU_HSI1_BUS_USER, 4, 1),
+	MUX(CLK_MOUT_HSI1_PCIE_USER, "mout_hsi1_pcie_user",
+	    mout_hsi1_pcie_user_p, PLL_CON0_MUX_CLKCMU_HSI1_PCIE_USER, 4, 1),
+};
+
+static const struct samsung_gate_clock hsi1_gate_clks[] __initconst = {
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_PCLK, "gout_hsi1_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_CMU_HSI1_PCLK, 21, CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_D_TZPC_HSI1_PCLK, "gout_hsi1_d_tzpc_hsi1_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_D_TZPC_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_GPC_HSI1_PCLK, "gout_hsi1_gpc_hsi1_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_GPC_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_HSI1_GPIO_HSI1_PCLK, "gout_hsi1_gpio_hsi1_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_GPIO_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_LHM_AXI_P_HSI1_I_CLK,
+	     "gout_hsi1_lhm_axi_p_hsi1_i_clk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_LHM_AXI_P_I_CLK, 21, CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_LHS_ACEL_D_HSI1_I_CLK,
+	     "gout_hsi1_lhs_acel_d_hsi1_i_clk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_LHS_ACEL_D_I_CLK, 21, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_GEN4A_DBI_ACLK,
+	     "gout_hsi1_pcie_gen4a_dbi_aclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_GEN4A_DBI_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_GEN4A_MSTR_ACLK,
+	     "gout_hsi1_pcie_gen4a_mstr_aclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_GEN4A_MSTR_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_GEN4A_SLV_ACLK,
+	     "gout_hsi1_pcie_gen4a_slv_aclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_GEN4A_SLV_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_GEN4A_DRIVER_APB_CLK,
+	     "gout_hsi1_pcie_gen4a_driver_apb_clk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_GEN4A_DRIVER_APB_CLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_GEN4A_PHY_REFCLK_IN,
+	     "gout_hsi1_pcie_gen4a_phy_refclk_in", "mout_hsi1_pcie_user",
+	     CLK_CON_GAT_HSI1_PCIE_GEN4A_PHY_REFCLK_IN, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_PCS_PMA_PHY_UDBG_APB_PCLK,
+	     "gout_hsi1_pcie_pcs_pma_phy_udbg_apb_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_PCS_PMA_PHY_UDBG_APB_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_PCS_PMA_PIPE_PAL_APB_PCLK,
+	     "gout_hsi1_pcie_pcs_pma_pipe_pal_apb_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_PCS_PMA_PIPE_PAL_APB_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_PCS_PMA_QCH_TM_APB_PCLK,
+	     "gout_hsi1_pcie_pcs_pma_qch_tm_apb_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_PCS_PMA_QCH_TM_APB_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_PCIE_IA_GEN4A_I_CLK,
+	     "gout_hsi1_pcie_ia_gen4a_i_clk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_PCIE_IA_GEN4A_I_CLK, 21, 0, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_PPMU_HSI1_ACLK, "gout_hsi1_ppmu_hsi1_aclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_PPMU_ACLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_PPMU_HSI1_PCLK, "gout_hsi1_ppmu_hsi1_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_PPMU_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_HSI1_QE_PCIE_GEN4A_ACLK, "gout_hsi1_qe_pcie_gen4a_aclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_QE_PCIE_GEN4A_ACLK, 21,
+	     0, 0),
+	GATE(CLK_GOUT_HSI1_QE_PCIE_GEN4A_PCLK, "gout_hsi1_qe_pcie_gen4a_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_QE_PCIE_GEN4A_PCLK, 21,
+	     0, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_CLK_HSI1_BUS_CLK, "gout_hsi1_clk_hsi1_bus_clk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_RSTNSYNC_CLK_BUS, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_CLK_HSI1_OSCCLK_CLK,
+	     "gout_hsi1_clk_hsi1_oscclk_clk", "oscclk",
+	     CLK_CON_GAT_HSI1_RSTNSYNC_CLK_OSCCLK, 21, CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_SSMT_HSI1_ACLK, "gout_hsi1_ssmt_hsi1_aclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_SSMT_ACLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_SSMT_HSI1_PCLK, "gout_hsi1_ssmt_hsi1_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_SSMT_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_SSMT_PCIE_IA_GEN4A_ACLK,
+	     "gout_hsi1_ssmt_pcie_ia_gen4a_aclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_SSMT_PCIE_IA_GEN4A_ACLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_SSMT_PCIE_IA_GEN4A_PCLK,
+	     "gout_hsi1_ssmt_pcie_ia_gen4a_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_SSMT_PCIE_IA_GEN4A_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_SYSMMU_HSI1_CLK_S2, "gout_hsi1_sysmmu_hsi1_clk_s2",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_SYSMMU_CLK_S2, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_HSI1_SYSREG_HSI1_PCLK, "gout_hsi1_sysreg_hsi1_pclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_SYSREG_PCLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_HSI1_UASC_PCIE_GEN4A_DBI_ACLK,
+	     "gout_hsi1_uasc_pcie_gen4a_dbi_aclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_DBI_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_UASC_PCIE_GEN4A_DBI_PCLK,
+	     "gout_hsi1_uasc_pcie_gen4a_dbi_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_DBI_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_UASC_PCIE_GEN4A_SLV_ACLK,
+	     "gout_hsi1_uasc_pcie_gen4a_slv_aclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_SLV_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_HSI1_UASC_PCIE_GEN4A_SLV_PCLK,
+	     "gout_hsi1_uasc_pcie_gen4a_slv_pclk", "mout_hsi1_bus_user",
+	     CLK_CON_GAT_HSI1_UASC_PCIE_GEN4A_SLV_PCLK, 21, 0, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_XIU_D_HSI1_ACLK, "gout_hsi1_xiu_d_hsi1_aclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_XIU_D_ACLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+	/* TODO: should have a driver for this */
+	GATE(CLK_GOUT_HSI1_XIU_P_HSI1_ACLK, "gout_hsi1_xiu_p_hsi1_aclk",
+	     "mout_hsi1_bus_user", CLK_CON_GAT_HSI1_XIU_P_ACLK, 21,
+	     CLK_IGNORE_UNUSED, 0),
+};
+
+static const struct samsung_cmu_info hsi1_cmu_info __initconst = {
+	.mux_clks		= hsi1_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(hsi1_mux_clks),
+	.gate_clks		= hsi1_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(hsi1_gate_clks),
+	.nr_clk_ids		= CLKS_NR_HSI1,
+	.clk_regs		= hsi1_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(hsi1_clk_regs),
+	.clk_name		= "bus",
+	.auto_clock_gate	= true,
+	.gate_dbg_offset	= GS101_GATE_DBG_OFFSET,
+	.option_offset		= HSI1_CMU_HSI1_CONTROLLER_OPTION,
+};
+
 /* ---- CMU_HSI2 ------------------------------------------------------------ */
 
 /* Register Offset definitions for CMU_HSI2 (0x14400000) */
@@ -4728,6 +4955,9 @@ static const struct of_device_id gs101_cmu_of_match[] = {
 	}, {
 		.compatible = "google,gs101-cmu-hsi0",
 		.data = &hsi0_cmu_info,
+	}, {
+		.compatible = "google,gs101-cmu-hsi1",
+		.data = &hsi1_cmu_info,
 	}, {
 		.compatible = "google,gs101-cmu-hsi2",
 		.data = &hsi2_cmu_info,

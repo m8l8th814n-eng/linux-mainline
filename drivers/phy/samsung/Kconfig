@@ -21,6 +21,15 @@ config PHY_EXYNOS_MIPI_VIDEO
 	  Support for MIPI CSI-2 and MIPI DSI DPHY found on Samsung S5P
 	  and Exynos SoCs.
 
+config PHY_GS101_PCIE
+	tristate "Google gs101 PCIe PHY driver"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on OF && HAS_IOMEM
+	select GENERIC_PHY
+	help
+	  Enable PCIe PHY support for the Google gs101 SoC, used by the
+	  Gen4A root complex in the HSI1 block.
+
 config PHY_EXYNOS_PCIE
 	bool "Exynos PCIe PHY driver"
 	depends on OF && (ARCH_EXYNOS || COMPILE_TEST)

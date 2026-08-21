@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
+
+ccflags-y += -I$(srctree)/sound/usb
+ccflags-y += -I$(srctree)/../private/google-modules/aoc
+ccflags-y += -I$(srctree)/../private/google-modules/aoc_ipc
+
+obj-$(CONFIG_AOC_DP)	+= aoc_alsa_dp.o

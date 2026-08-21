@@ -400,6 +400,16 @@ config PCI_EXYNOS
 	  hardware and therefore the driver re-uses the DesignWare core
 	  functions to implement the driver.
 
+config PCIE_GS101
+	tristate "Google gs101 PCIe controller"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on PCI_MSI
+	select PCIE_DW_HOST
+	help
+	  Enables support for the PCIe Gen4A root complex in the HSI1 block of
+	  the Google gs101 SoC, used by the Pixel 6 series. The controller is
+	  DesignWare based, so the driver re-uses the DesignWare core.
+
 config PCIE_FU740
 	bool "SiFive FU740 PCIe controller"
 	depends on PCI_MSI

@@ -534,6 +534,11 @@
 			no-map;
 		};
 
+		/*
+		 * Must stay "no-map": the AoC driver claims this range with
+		 * devm_request_mem_region() and maps it with devm_ioremap_wc(),
+		 * which requires the memory to be outside System RAM.
+		 */
 		aoc_reserve: aoc@94000000 {
 			reg = <0x0 0x94000000 0x03000000>;
 			no-map;
@@ -565,11 +570,35 @@
 		};
 	};
 
+	/*
+	 * The Samsung SysMMU driver does not build iommu groups itself: a
+	 * client device points at one of these through "samsung,iommu-group",
+	 * and samsung-iommu-group.c allocates the group when this node probes.
+	 * Without it, device_group() fails with "group is not registered" and
+	 * the client never gets a default domain.
+	 */
+	iommu_group_aoc: iommu-group-aoc {
+		compatible = "samsung,sysmmu-group";
+	};
+
+	/*
+	 * Owns the drm_device and binds the display pipeline together. The
+	 * pieces -- DECON, and later DPP and DSIM -- have their own nodes and
+	 * attach as components. This one has no registers of its own.
+	 */
+	display-subsystem {
+		compatible = "google,gs101-display-subsystem";
+	};
+
 	soc: soc@0 {
 		compatible = "simple-bus";
 		#address-cells = <1>;
 		#size-cells = <1>;
-		ranges = <0x0 0x0 0x0 0x40000000>;
+		ranges = <0x0 0x0 0x0 0x40000000>,
+			 /* PCIe Gen4A outbound + config window (HSI1) */
+			 <0x40000000 0x0 0x40000000 0x01000000>,
+			 /* PCIe Gen4A outbound + config window (HSI2) */
+			 <0x60000000 0x0 0x60000000 0x01000000>;
 
 		efuse@10000000 {
 			compatible = "google,gs101-otp";
@@ -1529,7 +1558,8 @@
 				 <&cmu_peric1 CLK_GOUT_PERIC1_PERIC1_TOP0_IPCLK_6>;
 			clock-names = "pclk", "ipclk";
 			samsung,sysreg = <&sysreg_peric1 0x1014>;
-			status = "disabled";
+			samsung,mode = <USI_MODE_SPI>;
+			status = "okay";
 
 			hsi2c_13: i2c@10d60000 {
 				compatible = "google,gs101-hsi2c",
@@ -1570,7 +1600,7 @@
 				interrupts = <GIC_SPI 656 IRQ_TYPE_LEVEL_HIGH 0>;
 				pinctrl-0 = <&spi13_bus>;
 				pinctrl-names = "default";
-				status = "disabled";
+				status = "okay";
 			};
 		};
 
@@ -1646,6 +1676,130 @@
 			clocks = <0>;
 			clock-names = "pclk";
 			interrupts = <GIC_SPI 471 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
+		cmu_hsi1: clock-controller@11800000 {
+			compatible = "google,gs101-cmu-hsi1";
+			reg = <0x11800000 0x10000>;
+			#clock-cells = <1>;
+			clocks = <&ext_24_5m>,
+				 <&cmu_top CLK_DOUT_CMU_HSI1_BUS>,
+				 <&cmu_top CLK_DOUT_CMU_HSI1_PCIE>;
+			clock-names = "oscclk", "bus", "pcie";
+			samsung,sysreg = <&sysreg_hsi1>;
+		};
+
+		sysreg_hsi1: syscon@11820000 {
+			compatible = "google,gs101-hsi1-sysreg", "syscon";
+			reg = <0x11820000 0x10000>;
+			clocks = <&cmu_hsi1 CLK_GOUT_HSI1_SYSREG_HSI1_PCLK>;
+		};
+
+		pcie_phy0: phy@11950000 {
+			compatible = "google,gs101-pcie-phy";
+			reg = <0x11950000 0x2000>,
+			      <0x11940000 0x1000>,
+			      <0x11920000 0x2000>;
+			reg-names = "phy", "pcs", "elbi";
+			clocks = <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_PCS_PMA_PIPE_PAL_APB_PCLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_PCS_PMA_QCH_TM_APB_PCLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_PCS_PMA_PHY_UDBG_APB_PCLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN4A_PHY_REFCLK_IN>;
+			clock-names = "pipe_pal", "qch_tm", "udbg", "refclk";
+			num-lanes = <2>;
+			#phy-cells = <0>;
+			status = "okay";
+		};
+
+		pcie0: pcie@11920000 {
+			compatible = "google,gs101-pcie";
+			reg = <0x11920000 0x2000>,
+			      <0x11c00000 0x301000>,
+			      <0x40ffe000 0x2000>;
+			reg-names = "elbi", "dbi", "config";
+			device_type = "pci";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x82000000 0 0x40000000 0x40000000 0 0x00ff0000>;
+			bus-range = <0x00 0xff>;
+			num-lanes = <2>;
+			max-link-speed = <3>;
+			interrupts = <GIC_SPI 472 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "msi";
+			clocks = <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN4A_DBI_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN4A_MSTR_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN4A_SLV_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN4A_DRIVER_APB_CLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_IA_GEN4A_I_CLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_UASC_PCIE_GEN4A_DBI_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_UASC_PCIE_GEN4A_DBI_PCLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_UASC_PCIE_GEN4A_SLV_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_UASC_PCIE_GEN4A_SLV_PCLK>;
+			clock-names = "dbi", "mstr", "slv", "driver_apb", "ia",
+				      "uasc_dbi_aclk", "uasc_dbi_pclk",
+				      "uasc_slv_aclk", "uasc_slv_pclk";
+			phys = <&pcie_phy0>;
+			phy-names = "pcie";
+			reset-gpios = <&gph0 0 GPIO_ACTIVE_LOW>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pcie0_clkreq>, <&pcie0_perst>;
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			samsung,pmu-offset = <0x3ec0>;
+			status = "okay";
+		};
+
+		pcie_phy1: phy@14550000 {
+			compatible = "google,gs101-pcie-phy";
+			reg = <0x14550000 0x2000>,
+			      <0x14540000 0x1000>,
+			      <0x14520000 0x2000>;
+			reg-names = "phy", "pcs", "elbi";
+			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCS_PMA_PIPE_PAL_PCIE_I_APB_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCS_PMA_PCIEPHY210X2_QCH_I_APB_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCS_PMA_PHY_UDBG_I_APB_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_PHY_REFCLK_IN>;
+			clock-names = "pipe_pal", "qch_tm", "udbg", "refclk";
+			num-lanes = <2>;
+			#phy-cells = <0>;
+			status = "okay";
+		};
+
+		pcie1: pcie@14520000 {
+			compatible = "google,gs101-pcie";
+			reg = <0x14520000 0x2000>,
+			      <0x14800000 0x301000>,
+			      <0x60ffe000 0x2000>;
+			reg-names = "elbi", "dbi", "config";
+			device_type = "pci";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x82000000 0 0x60000000 0x60000000 0 0x00ff0000>;
+			bus-range = <0x00 0xff>;
+			num-lanes = <2>;
+			max-link-speed = <3>;
+			interrupts = <GIC_SPI 509 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "msi";
+			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_DBI_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_MSTR_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_SLV_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_I_DRIVER_APB_CLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_IA_GEN4A_1_I_CLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_UASC_PCIE_GEN4A_DBI_1_ACLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_UASC_PCIE_GEN4A_DBI_1_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_UASC_PCIE_GEN4A_SLV_1_ACLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_UASC_PCIE_GEN4A_SLV_1_PCLK>;
+			clock-names = "dbi", "mstr", "slv", "driver_apb", "ia",
+				      "uasc_dbi_aclk", "uasc_dbi_pclk",
+				      "uasc_slv_aclk", "uasc_slv_pclk";
+			phys = <&pcie_phy1>;
+			phy-names = "pcie";
+			reset-gpios = <&gph2 0 GPIO_ACTIVE_LOW>;
+			vpcie-supply = <&wlan_pwrseq>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pcie1_clkreq>, <&pcie1_perst>;
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			samsung,pmu-offset = <0x3ec4>;
+			status = "okay";
 		};
 
 		cmu_hsi2: clock-controller@14400000 {
@@ -1832,6 +1986,41 @@
 			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSREG_DPU_PCLK>;
 		};
 
+		/*
+		 * DECON0, the display controller driving the panel. Register
+		 * banks and interrupt numbers come from the vendor device tree
+		 * (gs101-drm-dpu.dtsi); "win" and "sub" are shared with DECON1,
+		 * which is not described here because nothing uses it.
+		 *
+		 * The DQE bank at 0x1c360000 is omitted on purpose -- display
+		 * quality enhancement is not needed to get a picture.
+		 *
+		 * The driver behind this currently maps registers, acquires
+		 * clocks and then fails probe. The node exists so that much can
+		 * be verified; it produces no display output.
+		 */
+		decon0: decon@1c300000 {
+			compatible = "google,gs101-decon";
+			reg = <0x1c300000 0x6000>,
+			      <0x1c310000 0x6000>,
+			      <0x1c320000 0x10000>,
+			      <0x1c330000 0x6000>;
+			reg-names = "main", "win", "sub", "wincon";
+
+			interrupts = <GIC_SPI 337 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "frame_done";
+
+			clocks = <&cmu_dpu CLK_GOUT_DPU_PCLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_CLK_DPU_BUSP_CLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_CLK_DPU_BUSD_CLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_DPUF_ACLK_DMA>,
+				 <&cmu_dpu CLK_GOUT_DPU_DPUF_ACLK_DPP>;
+			clock-names = "pclk", "busp", "busd",
+				      "aclk_dma", "aclk_dpp";
+
+			decon,id = <0>;
+		};
+
 		cmu_top: clock-controller@1e080000 {
 			compatible = "google,gs101-cmu-top";
 			reg = <0x1e080000 0x10000>;
@@ -1849,6 +2038,96 @@
 			interrupts = <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 421 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 419 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
+		mbox_aoc: mailbox@176a0000 {
+			compatible = "google,mailbox-whitechapel";
+			reg = <0x176a0000 0x1000>;
+			interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH 0>;
+			mbox-name = "aoc2ap";
+			#mbox-cells = <1>;
+		};
+
+		/*
+		 * SysMMU in front of AoC. gs101 uses the v8 generation
+		 * throughout ("samsung,sysmmu-v8"); v9 is gs201/zuma.
+		 *
+		 * Omitted from the vendor node on purpose:
+		 *   - sysmmu,secure-irq / sysmmu,secure_base: the secure path
+		 *     talks to trusted firmware over SMC, which is not
+		 *     available here. Only the non-secure interrupt (110) is
+		 *     wired up; the secure one is 111.
+		 *   - clocks: devm_clk_get(dev, "gate") treats -ENOENT as "no
+		 *     gate clock" and carries on.
+		 *   - sysmmu,default_tlb / sysmmu,tlb_property: TLB prefetch
+		 *     tuning, not required to translate.
+		 */
+		sysmmu_aoc: sysmmu@1a090000 {
+			compatible = "samsung,sysmmu-v8";
+			reg = <0x1a090000 0x10000>;
+			interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH 0>;
+			qos = <15>;
+			sysmmu,async-fault;
+			#iommu-cells = <0>;
+		};
+
+		/*
+		 * AoC (Always-on Compute) coprocessor. Audio, sensors and
+		 * several other services live behind it.
+		 *
+		 * "samsung,iommu-group" and "gsa-device" from the vendor node
+		 * are deliberately absent: there is no GSA driver in mainline,
+		 * and leaving "gsa-enabled" unset keeps the driver on its
+		 * unsigned firmware boot path, which needs neither.
+		 */
+		aoc: aoc@19000000 {
+			compatible = "google,aoc";
+
+			reg = <0x19000000 0x01000000>,
+			      <0x175d0000 0x00001000>,
+			      <0x1a0b0000 0x00001000>,
+			      <0x1a060000 0x00005000>;
+			reg-names = "blk_aoc", "aoc_req", "aoc_s2mpu", "ssmt_aoc";
+
+			interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "watchdog";
+
+			iommus = <&sysmmu_aoc>;
+			samsung,iommu-group = <&iommu_group_aoc>;
+			memory-region = <&aoc_reserve>;
+
+			mbox-names = "aoc2ap";
+			mboxes = <&mbox_aoc 0>, <&mbox_aoc 1>,
+				 <&mbox_aoc 2>, <&mbox_aoc 3>,
+				 <&mbox_aoc 4>, <&mbox_aoc 5>,
+				 <&mbox_aoc 6>, <&mbox_aoc 7>,
+				 <&mbox_aoc 8>, <&mbox_aoc 9>,
+				 <&mbox_aoc 10>, <&mbox_aoc 11>,
+				 <&mbox_aoc 12>, <&mbox_aoc 13>,
+				 <&mbox_aoc 14>, <&mbox_aoc 15>;
+
+			acpm-ipc-channel = <13>;
+			force-vnom = <0>;
+
+			/*
+			 * Offsets into the blk_aoc window above. The vendor
+			 * 5.10 driver hardcoded these per SoC; the mainline
+			 * branch reads them from the device tree instead.
+			 * These are the CONFIG_SOC_GS101 ("WC", Whitechapel)
+			 * values -- do not use the ones from the binding's
+			 * example, which are for a SoC with a 32 MB window.
+			 */
+			pcu-base = <0xb00000>;
+			gpio-base = <0xb70000>;
+			pcu-db-set-offset = <0xd004>;
+			pcu-db-clr-offset = <0xd008>;
+			cp-aperture-start-offset = <0x5fdf80>;
+			cp-aperture-end-offset = <0x5fffff>;
+			clock-divider = <6>;
+			mbox-channels = <16>;
+
+			channel-max-pending-msgs = <128>;
+			block-channel-threshold = <64>;
 		};
 	};
 

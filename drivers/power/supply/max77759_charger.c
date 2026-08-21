@@ -683,6 +683,18 @@ static void max_tcpci_unregister_psy_notifier(void *nb)
 	power_supply_unreg_notifier(nb);
 }
 
+static int max77759_charger_sync_tcpm(struct power_supply *psy, void *data)
+{
+	struct max77759_charger *chg = data;
+
+	if (!strnstr(psy->desc->name, "tcpm-source", strlen("tcpm-source")))
+		return 0;
+
+	chg->tcpm_psy = psy;
+	schedule_delayed_work(&chg->psy_work, 0);
+	return 1;
+}
+
 static int max77759_charger_probe(struct platform_device *pdev)
 {
 	struct regulator_config chgin_otg_reg_cfg;
@@ -748,6 +760,8 @@ static int max77759_charger_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "Failed to add devm action to unregister psy notifier\n");
+
+	power_supply_for_each_psy(chg, max77759_charger_sync_tcpm);
 
 	return max77759_init_irqhandler(chg);
 }

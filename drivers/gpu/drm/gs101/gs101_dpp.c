@@ -26,6 +26,7 @@
 
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -33,6 +34,7 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
@@ -69,6 +71,9 @@ enum gs101_dpp_reg_bank {
  */
 #define DPP_COM_VERSION		0x0000
 #define GLB_DPU_DMA_VERSION	0x0f00
+
+/* regs-dpp.h:173. The luminance base address -- where pixels are fetched. */
+#define RDMA_BASEADDR_Y8	0x0040
 
 /*
  * DPP sits behind cmu_dpu just like DECON, and DECON enables these only long
@@ -165,6 +170,32 @@ static int gs101_dpp_atomic_check(struct drm_plane *plane,
 static void gs101_dpp_atomic_update(struct drm_plane *plane,
 				    struct drm_atomic_commit *state)
 {
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct gs101_dpp *dpp = plane_to_dpp(plane);
+	dma_addr_t addr;
+
+	if (!new_state->fb || !new_state->crtc)
+		return;
+
+	/*
+	 * Only the base address is written. Size, format, alpha and the
+	 * outstanding-transaction limits are left exactly as the bootloader
+	 * set them, and the mode is fixed to the one they describe -- so
+	 * pointing the fetch engine at a different buffer is the whole change.
+	 *
+	 * This is deliberate. Taking over a working configuration one register
+	 * at a time is far easier to debug than reinitialising the block and
+	 * finding out which of thirty writes was wrong.
+	 *
+	 * Contiguity is guaranteed: buffers come from DRM_GEM_DMA, and dpp0 has
+	 * no iommus property, so this is a raw physical address. The high half
+	 * is dropped because CMA sits at 0xfe000000, below 4G -- that stops
+	 * being true if a wider buffer pool is ever used.
+	 */
+	addr = drm_fb_dma_get_gem_addr(new_state->fb, new_state, 0);
+
+	writel(lower_32_bits(addr), dpp->regs[DPP_REG_DMA] + RDMA_BASEADDR_Y8);
 }
 
 /* TODO: dpp_reg_deinit() (dpp_reg.c:847) */
@@ -197,7 +228,7 @@ static const struct drm_plane_funcs gs101_dpp_plane_funcs = {
  * TODO: dpp_reg_get_irq_and_clear() (dpp_reg.c:972). The DMA interrupt
  * reports underrun and read errors, which are the ones worth acting on.
  */
-static irqreturn_t gs101_dpp_irq(int irq, void *data)
+static irqreturn_t __maybe_unused gs101_dpp_irq(int irq, void *data)
 {
 	return IRQ_NONE;
 }
@@ -222,6 +253,18 @@ static int gs101_dpp_bind(struct device *dev, struct device *master,
 	 * is unusable, and userspace would see a primary plane it can never
 	 * attach. DECON creates the CRTC, so the mask is only knowable there.
 	 */
+	/*
+	 * GEM buffers are allocated through drm_dev_dma_dev(), which defaults
+	 * to drm->dev -- the display-subsystem node. That node is virtual: no
+	 * reg, no dma-ranges, no DMA of its own. Allocating against it sends
+	 * every framebuffer through swiotlb bounce buffers, which then fail,
+	 * because a 2 MB mapping never fits there.
+	 *
+	 * DPP is the block that actually fetches pixels, so it is the right
+	 * device to allocate against.
+	 */
+	drm_dev_set_dma_dev(drm, dpp->dev);
+
 	ret = drm_universal_plane_init(drm, &dpp->plane, 0,
 				       &gs101_dpp_plane_funcs,
 				       gs101_dpp_formats,
@@ -306,6 +349,18 @@ static int gs101_dpp_probe(struct platform_device *pdev)
 	 */
 	dpp->irq_dma = platform_get_irq_byname_optional(pdev, "dma");
 	dpp->irq_dpp = platform_get_irq_byname_optional(pdev, "dpp");
+
+	/*
+	 * RDMA_BASEADDR_Y8 is a single 32-bit register and atomic_update()
+	 * writes lower_32_bits() into it, so a buffer above 4G would be
+	 * silently fetched from the wrong address. Constrain allocations to
+	 * what the hardware can actually address -- ZONE_DMA covers
+	 * 0x80000000-0xffffffff here, which is where the bootloader's
+	 * framebuffer lives too.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return dev_err_probe(dev, ret, "no 32-bit DMA mask\n");
 
 	for (i = 0; i < ARRAY_SIZE(gs101_dpp_clk_names); i++)
 		dpp->clks[i].id = gs101_dpp_clk_names[i];

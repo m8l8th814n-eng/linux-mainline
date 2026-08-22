@@ -12,6 +12,7 @@
  * register; getting this far only proves the plumbing holds together.
  */
 
+#include <linux/aperture.h>
 #include <linux/component.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -19,13 +20,17 @@
 #include <linux/platform_device.h>
 
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_connector.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_fbdev_dma.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_mode_config.h>
 #include <drm/drm_of.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_vblank.h>
 
 #include "gs101_drm.h"
@@ -41,6 +46,10 @@ static const struct drm_driver gs101_drm_driver = {
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
 	DRM_GEM_DMA_DRIVER_OPS,
+	/* fbdev emulation is declared here and instantiated by
+	 * drm_client_setup() after registration; drm_fbdev_dma_setup() is gone.
+	 */
+	DRM_FBDEV_DMA_DRIVER_OPS,
 };
 
 static const struct drm_mode_config_funcs gs101_drm_mode_config_funcs = {
@@ -48,6 +57,116 @@ static const struct drm_mode_config_funcs gs101_drm_mode_config_funcs = {
 	.atomic_check	= drm_atomic_helper_check,
 	.atomic_commit	= drm_atomic_helper_commit,
 };
+
+/*
+ * Off by default. Registering makes this card0 -- the first node userspace
+ * finds -- and evicts simpledrm, which is currently the only thing putting
+ * pixels on the panel. If the takeover does not work the screen goes black and
+ * stays black across reboots, because the module loads every boot.
+ *
+ * Behind a parameter, recovery is rebooting without it. Turn it on with
+ * gs101_drm.modeset=1 once there is reason to believe it works.
+ */
+static bool gs101_drm_modeset;
+module_param_named(modeset, gs101_drm_modeset, bool, 0444);
+MODULE_PARM_DESC(modeset, "take over the display from simpledrm (default: no)");
+
+/*
+ * The panel is already running: the bootloader initialised it and left it
+ * scanning out, and nothing here touches DSI. So this describes what is
+ * already true rather than requesting anything.
+ *
+ * Only the visible size is known for certain -- it is what the framebuffer
+ * node and DPP0's SRC_SIZE agree on. The porches are made up, because in
+ * command mode DECON transfers on the panel's TE pulse and never uses them;
+ * they exist because drm_display_mode requires a pixel clock, and that needs
+ * a total. The 60 Hz is measured, from DECON's TE counter.
+ *
+ * The physical size is real, and worth setting: without it userspace cannot
+ * compute DPI and picks a scale factor that makes everything unusably small
+ * on a 411 ppi panel.
+ */
+static const struct drm_display_mode gs101_drm_panel_mode = {
+	.clock = (1080 + 72 + 16 + 36) * (2400 + 32 + 4 + 18) * 60 / 1000,
+	.hdisplay = 1080,
+	.hsync_start = 1080 + 72,
+	.hsync_end = 1080 + 72 + 16,
+	.htotal = 1080 + 72 + 16 + 36,
+	.vdisplay = 2400,
+	.vsync_start = 2400 + 32,
+	.vsync_end = 2400 + 32 + 4,
+	.vtotal = 2400 + 32 + 4 + 18,
+	.width_mm = 67,
+	.height_mm = 148,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+};
+
+static int gs101_drm_connector_get_modes(struct drm_connector *connector)
+{
+	return drm_connector_helper_get_modes_fixed(connector,
+						    &gs101_drm_panel_mode);
+}
+
+static const struct drm_connector_helper_funcs gs101_drm_connector_helper_funcs = {
+	.get_modes	= gs101_drm_connector_get_modes,
+};
+
+/*
+ * No .destroy: drmm_connector_init() rejects it outright
+ * (drm_connector.c:529), because the DRM-managed release owns teardown. The
+ * plain drm_connector_init() wants the opposite, which is how DSI-1 came to
+ * leak and the reloaded connector came back named DSI-2.
+ */
+static const struct drm_connector_funcs gs101_drm_connector_funcs = {
+	.fill_modes		= drm_helper_probe_single_connector_modes,
+	.reset			= drm_atomic_helper_connector_reset,
+	.atomic_duplicate_state	= drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state	= drm_atomic_helper_connector_destroy_state,
+};
+
+/*
+ * A placeholder for DSIM. The panel is hardwired and always present, so the
+ * encoder does nothing and the connector is permanently connected -- which is
+ * exactly true today, and becomes a lie the moment DSIM can power the panel
+ * down. Replace it then.
+ */
+static int gs101_drm_attach_panel(struct gs101_drm *priv)
+{
+	struct drm_device *drm = &priv->drm;
+	struct drm_crtc *crtc;
+	int ret;
+
+	/*
+	 * NULL funcs is correct for the drmm_ variants and only for those:
+	 * they refuse a .destroy hook (drm_encoder.c:244) because the
+	 * DRM-managed release does the cleanup. Passing NULL to the plain
+	 * drm_encoder_init() instead dereferences it.
+	 */
+	ret = drmm_encoder_init(drm, &priv->encoder, NULL,
+				DRM_MODE_ENCODER_DSI, NULL);
+	if (ret)
+		return ret;
+
+	drm_for_each_crtc(crtc, drm)
+		priv->encoder.possible_crtcs |= drm_crtc_mask(crtc);
+
+	if (!priv->encoder.possible_crtcs) {
+		drm_err(drm, "no CRTC for the encoder to drive\n");
+		return -ENODEV;
+	}
+
+	ret = drmm_connector_init(drm, &priv->connector,
+				  &gs101_drm_connector_funcs,
+				  DRM_MODE_CONNECTOR_DSI, NULL);
+	if (ret)
+		return ret;
+
+	drm_connector_helper_add(&priv->connector,
+				 &gs101_drm_connector_helper_funcs);
+	priv->connector.status = connector_status_connected;
+
+	return drm_connector_attach_encoder(&priv->connector, &priv->encoder);
+}
 
 static int gs101_drm_bind(struct device *dev)
 {
@@ -82,36 +201,44 @@ static int gs101_drm_bind(struct device *dev)
 	if (ret)
 		return ret;
 
+	ret = gs101_drm_attach_panel(priv);
+	if (ret)
+		return ret;
+
+	if (!gs101_drm_modeset) {
+		dev_info(dev,
+			 "components bound; not registering (gs101_drm.modeset=1 to take over)\n");
+		return 0;
+	}
+
+	ret = drm_vblank_init(drm, drm->mode_config.num_crtc);
+	if (ret)
+		return ret;
+
+	drm_mode_config_reset(drm);
+
 	/*
-	 * Stop short of drm_dev_register() on purpose.
-	 *
-	 * DECON cannot create a CRTC yet -- that needs a primary plane, which
-	 * needs DPP. Registering now would expose a card with no CRTCs and no
-	 * connectors, next to the simpledrm card that is currently driving the
-	 * panel, and userspace would have to guess which one to use. Plasma
-	 * picking the empty one means a black screen with no obvious cause.
-	 *
-	 * So: prove the components bind, and leave registration for when there
-	 * is something to register. Add back, in order:
-	 *
-	 *	aperture_remove_conflicting_devices(0xfac00000, 0x9e3400,
-	 *					    gs101_drm_driver.name);
-	 *	drm_vblank_init(drm, drm->mode_config.num_crtc);
-	 *	drm_mode_config_reset(drm);
-	 *	drm_dev_register(drm, 0);
-	 *	drm_fbdev_dma_setup(drm, 32);
-	 *
-	 * The aperture call has to come first, and it is not optional. simpledrm
-	 * is bound to chosen:framebuffer-0 and owns splash@fac00000 -- the same
-	 * memory DPP0 is scanning out. Registering without evicting it leaves two
-	 * cards driving one panel. That is the same mechanism by which i915 takes
+	 * Evict simpledrm before registering, not after. It is bound to
+	 * chosen:framebuffer-0 and owns splash@fac00000 -- the very memory DPP0
+	 * is fetching from. Registering first would leave two cards driving one
+	 * panel, each unaware of the other. Same mechanism by which i915 takes
 	 * over from the EFI framebuffer.
 	 *
-	 * The region is the splash reservation: 0xfac00000, 1080*2400*4 bytes.
-	 * Better to read it from the reserved-memory node than hardcode it, since
-	 * the size is only correct while the panel is 1080x2400.
+	 * TODO: read the region from the reserved-memory node instead. These
+	 * constants are only right while the panel is 1080x2400.
 	 */
-	dev_info(dev, "all display components bound; not registering DRM device yet\n");
+	ret = aperture_remove_conflicting_devices(0xfac00000, 1080 * 2400 * 4,
+						  gs101_drm_driver.name);
+	if (ret)
+		return ret;
+
+	ret = drm_dev_register(drm, 0);
+	if (ret)
+		return ret;
+
+	drm_client_setup(drm, NULL);
+
+	dev_info(dev, "registered; display taken over from simpledrm\n");
 
 	return 0;
 }
@@ -120,7 +247,16 @@ static void gs101_drm_unbind(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 
-	/* No drm_dev_unregister() to match: bind never registered it. */
+	if (gs101_drm_modeset) {
+		drm_dev_unregister(drm);
+		/*
+		 * Disables the CRTC, which takes vblank down with it. Without
+		 * it drm_vblank_init_release() warns that vblank is still
+		 * enabled at teardown (drm_vblank.c:527).
+		 */
+		drm_atomic_helper_shutdown(drm);
+	}
+
 	component_unbind_all(dev, drm);
 }
 
@@ -130,13 +266,18 @@ static const struct component_master_ops gs101_drm_master_ops = {
 };
 
 /*
- * Compatibles of the blocks that make up the pipeline. DECON is the only one
- * that exists so far; DPP and DSIM go here as they are written.
+ * Compatibles of the blocks that make up the pipeline, in bind order. DSIM
+ * goes here when it is written.
+ *
+ * The order is load-bearing: components bind in the order their matches were
+ * added, and DECON creates the CRTC in its bind, which needs a primary plane
+ * to already exist. Walking the device tree instead would bind DECON first,
+ * because decon@1c300000 is listed before dpp@1c0b0000 in gs101.dtsi.
  */
-static const struct of_device_id gs101_drm_component_ids[] = {
-	{ .compatible = "google,gs101-decon" },
-	{ .compatible = "google,gs101-dpp" },
-	{ }
+static const char * const gs101_drm_component_order[] = {
+	"google,gs101-dpp",
+	"google,gs101-decon",
+	"google,gs101-dsim",
 };
 
 static int gs101_drm_probe(struct platform_device *pdev)
@@ -145,18 +286,23 @@ static int gs101_drm_probe(struct platform_device *pdev)
 	struct component_match *match = NULL;
 	struct device_node *np;
 	unsigned int found = 0;
+	unsigned int i;
 
 	/*
-	 * Walk the whole tree rather than following ports/endpoints: the
+	 * Matched by compatible rather than by following ports/endpoints: the
 	 * pipeline graph is not described in the device tree yet, and this
 	 * keeps the master independent of that arriving later.
 	 */
-	for_each_matching_node(np, gs101_drm_component_ids) {
-		if (!of_device_is_available(np))
-			continue;
+	for (i = 0; i < ARRAY_SIZE(gs101_drm_component_order); i++) {
+		for_each_compatible_node(np, NULL,
+					 gs101_drm_component_order[i]) {
+			if (!of_device_is_available(np))
+				continue;
 
-		drm_of_component_match_add(dev, &match, component_compare_of, np);
-		found++;
+			drm_of_component_match_add(dev, &match,
+						   component_compare_of, np);
+			found++;
+		}
 	}
 
 	if (!found) {
@@ -201,6 +347,7 @@ static struct platform_driver gs101_drm_platform_driver = {
 static struct platform_driver * const gs101_drm_drivers[] = {
 	&gs101_dpp_driver,
 	&gs101_decon_driver,
+	&gs101_dsim_driver,
 	&gs101_drm_platform_driver,
 };
 

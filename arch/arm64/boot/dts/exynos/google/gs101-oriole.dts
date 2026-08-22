@@ -50,6 +50,22 @@
 	status = "okay";
 };
 
+/*
+ * The panel's supplies, the same two framebuffer0 holds. They are described
+ * here rather than in gs101.dtsi because they are board-level.
+ *
+ * DECON has no business owning these -- they belong to the panel, and should
+ * move to a panel node once DSIM exists. Until then something has to hold them
+ * across the handover: taking the display over unbinds simpledrm, which drops
+ * its references, and with no other user vci_disp is switched off and the
+ * panel dies mid-frame. That is not recoverable without a reboot, because the
+ * bootloader is what powers the panel back up.
+ */
+&decon0 {
+	vci-supply = <&s2mpg10_ldo22m>;
+	vddi-supply = <&s2mpg11_bucka>;
+};
+
 &spitouch {
 	st,dchip_id = /bits/ 8 <0x36 0x48>;
 	st,max-coords = <1079 2399>;

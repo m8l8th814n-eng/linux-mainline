@@ -3,13 +3,18 @@ config DRM_GS101
 	tristate "DRM support for Google gs101 (Tensor G1)"
 	depends on DRM && OF
 	depends on ARCH_EXYNOS || COMPILE_TEST
+	select DRM_CLIENT_SELECTION
+	select DRM_GEM_DMA_HELPER
 	select DRM_KMS_HELPER
 	help
 	  Display support for the Google gs101 SoC used in Pixel 6.
 
-	  This is work in progress: the DECON display controller driver
-	  currently only maps its registers and acquires its clocks, then
-	  fails probe. It does not produce a picture. Enable it to verify
-	  that cmu_dpu hands out the display clocks.
+	  Work in progress. DECON and DPP map their registers, take their
+	  clocks and build a CRTC with one plane, driven by the frame-done
+	  interrupt. There is no DSIM and no panel driver, so the panel has
+	  to have been left running by the bootloader.
+
+	  Taking the display over from simpledrm is off unless the module
+	  parameter modeset=1 is given.
 
 	  If M is selected, the module will be called gs101-drm.

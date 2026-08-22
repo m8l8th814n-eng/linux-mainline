@@ -16,6 +16,8 @@
  */
 struct gs101_drm {
 	struct drm_device drm;
+	struct drm_encoder encoder;
+	struct drm_connector connector;
 };
 
 static inline struct gs101_drm *to_gs101_drm(struct drm_device *drm)
@@ -25,5 +27,6 @@ static inline struct gs101_drm *to_gs101_drm(struct drm_device *drm)
 
 extern struct platform_driver gs101_decon_driver;
 extern struct platform_driver gs101_dpp_driver;
+extern struct platform_driver gs101_dsim_driver;
 
 #endif /* __GS101_DRM_H__ */

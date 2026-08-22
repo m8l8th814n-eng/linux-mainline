@@ -2065,6 +2065,26 @@
 			dpp,id = <0>;
 		};
 
+		/*
+		 * DSIM0, the MIPI DSI host. DSIM1 follows at 0x1c2d0000 and is
+		 * unused on Pixel 6.
+		 *
+		 * The vendor register layer names four regions -- DSI, PHY,
+		 * PHY_BIAS and SYS (dsim_cal.h:71) -- but only the DSI base is
+		 * documented in regs-dsim.h. The other three are needed before
+		 * the D-PHY can be programmed and are not described here yet.
+		 *
+		 * No clocks or interrupts: the driver only reads registers so
+		 * far, and does so on the clocks DECON already holds.
+		 */
+		dsim0: dsi@1c2c0000 {
+			compatible = "google,gs101-dsim";
+			reg = <0x1c2c0000 0x10000>;
+			reg-names = "dsi";
+
+			dsim,id = <0>;
+		};
+
 		cmu_top: clock-controller@1e080000 {
 			compatible = "google,gs101-cmu-top";
 			reg = <0x1e080000 0x10000>;

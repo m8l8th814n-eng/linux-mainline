@@ -32,10 +32,13 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regulator/consumer.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_plane.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
@@ -82,6 +85,26 @@ static const struct component_ops gs101_decon_component_ops;
 					 HW_TRIG_MASK_SLAVE0 | \
 					 HW_TRIG_EN)
 
+/* regs-decon.h:146 and :166. Frame done is what drives vblank. */
+#define DECON_INT_EN			0x0060
+#define  INT_EN_FRAME_DONE		BIT(13)
+#define  INT_EN_FRAME_START		BIT(12)
+#define  INT_EN_EXTRA			BIT(4)
+#define  INT_EN				BIT(0)
+
+/*
+ * regs-decon.h:138. Register writes land in shadow copies; setting a bit here
+ * asks the hardware to latch them at the next safe point.
+ */
+#define DECON_SHD_REG_UP_REQ		0x0050
+#define  SHD_REG_UP_REQ_GLOBAL		BIT(31)
+#define  SHD_REG_UP_REQ_CMP		BIT(20)
+
+#define DECON_INT_PEND			0x0070
+#define  INT_PEND_FRAME_DONE		BIT(13)
+#define  INT_PEND_FRAME_START		BIT(12)
+#define  INT_PEND_EXTRA			BIT(4)
+
 /*
  * DECON0 register banks, from the vendor device tree (gs101-drm-dpu.dtsi):
  *
@@ -119,6 +142,15 @@ static const char * const gs101_decon_clk_names[] = {
 	"pclk", "busp", "busd", "aclk_dma", "aclk_dpp",
 };
 
+/*
+ * The panel's analog and digital supplies. They belong to the panel, not to
+ * DECON, and should move to a panel driver once DSIM exists -- but something
+ * has to hold them across the handover. See the comment at the call site.
+ */
+static const char * const gs101_decon_supplies[] = {
+	"vci", "vddi",
+};
+
 /**
  * struct gs101_decon - one DECON instance
  * @dev:	backing platform device
@@ -138,6 +170,8 @@ struct gs101_decon {
 	int irq_frame_done;
 	struct drm_crtc crtc;
 	u32 id;
+	unsigned int frame_count;
+	unsigned int vblank_reports;	/* TODO: diagnostic, remove */
 };
 
 static inline struct gs101_decon *crtc_to_decon(struct drm_crtc *crtc)
@@ -203,6 +237,8 @@ static void gs101_decon_atomic_enable(struct drm_crtc *crtc,
 {
 	struct gs101_decon *decon = crtc_to_decon(crtc);
 
+	dev_info_once(decon->dev, "DECON%u: atomic_enable\n", decon->id);
+
 	pm_runtime_get_sync(decon->dev);
 
 	gs101_decon_hw_init(decon);
@@ -232,6 +268,46 @@ static void gs101_decon_atomic_disable(struct drm_crtc *crtc,
 static void gs101_decon_atomic_flush(struct drm_crtc *crtc,
 				     struct drm_atomic_commit *state)
 {
+	struct gs101_decon *decon = crtc_to_decon(crtc);
+	void __iomem *main = decon->regs[DECON_REG_MAIN];
+	struct drm_pending_vblank_event *event;
+	u32 val;
+
+	/*
+	 * decon_reg_update_req_and_unmask() (decon_reg.c:2055), which is
+	 * update_req_global() followed by set_trigger(TRIG_UNMASK).
+	 *
+	 * Latch the shadow registers first -- the plane just wrote a new base
+	 * address into one -- then unmask the trigger so the next TE pulse from
+	 * the panel transfers the frame. In command mode nothing moves until
+	 * that trigger is unmasked, which is the whole reason a single frame
+	 * cannot tear here the way a free-running scanout does.
+	 */
+	writel(SHD_REG_UP_REQ_GLOBAL | SHD_REG_UP_REQ_CMP,
+	       main + DECON_SHD_REG_UP_REQ);
+
+	val = readl(main + DECON_TRIG_CON);
+	val |= HW_TRIG_EN;
+	val &= ~HW_TRIG_MASK_DECON;
+	writel(val, main + DECON_TRIG_CON);
+
+	/*
+	 * Hand the flip completion to the vblank machinery. frame_done arrives
+	 * once the transfer finishes, and drm_crtc_handle_vblank() in the
+	 * interrupt sends the event from there.
+	 */
+	event = crtc->state->event;
+	if (!event)
+		return;
+
+	crtc->state->event = NULL;
+
+	spin_lock_irq(&crtc->dev->event_lock);
+	if (drm_crtc_vblank_get(crtc) == 0)
+		drm_crtc_arm_vblank_event(crtc, event);
+	else
+		drm_crtc_send_vblank_event(crtc, event);
+	spin_unlock_irq(&crtc->dev->event_lock);
 }
 
 static const struct drm_crtc_helper_funcs gs101_decon_crtc_helper_funcs = {
@@ -240,21 +316,48 @@ static const struct drm_crtc_helper_funcs gs101_decon_crtc_helper_funcs = {
 	.atomic_flush	= gs101_decon_atomic_flush,
 };
 
-/* TODO: decon_reg_set_interrupts() (:2181) to unmask; the frame-done
- * interrupt is what drives vblank.
+/*
+ * The master enable (INT_EN) is switched on in probe and stays on; these only
+ * gate the frame-done source, which is what vblank is derived from.
+ *
+ * The bootloader already leaves FRAME_DONE unmasked, so enabling is normally a
+ * no-op -- but disable_vblank clears it, and nothing else would put it back.
  */
 static int gs101_decon_enable_vblank(struct drm_crtc *crtc)
 {
-	return -EOPNOTSUPP;
+	struct gs101_decon *decon = crtc_to_decon(crtc);
+	void __iomem *reg = decon->regs[DECON_REG_MAIN] + DECON_INT_EN;
+
+	dev_info_once(decon->dev, "DECON%u: enable_vblank\n", decon->id);
+
+	/*
+	 * TODO: diagnostic. Rearm the handler's sampling so the next few
+	 * interrupts are logged with vblank supposedly enabled -- the earlier
+	 * samples were all spent before this point and said nothing about the
+	 * state that matters.
+	 */
+	decon->vblank_reports = 0;
+
+	writel(readl(reg) | INT_EN_FRAME_DONE, reg);
+
+	return 0;
 }
 
 static void gs101_decon_disable_vblank(struct drm_crtc *crtc)
 {
+	struct gs101_decon *decon = crtc_to_decon(crtc);
+	void __iomem *reg = decon->regs[DECON_REG_MAIN] + DECON_INT_EN;
+
+	dev_info_once(decon->dev, "DECON%u: disable_vblank\n", decon->id);
+
+	writel(readl(reg) & ~INT_EN_FRAME_DONE, reg);
 }
 
 static const struct drm_crtc_funcs gs101_decon_crtc_funcs = {
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= drm_atomic_helper_page_flip,
+	/* Same reason as the DPP plane: drm_crtc_init_with_planes() warns. */
+	.destroy		= drm_crtc_cleanup,
 	.reset			= drm_atomic_helper_crtc_reset,
 	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
@@ -263,12 +366,84 @@ static const struct drm_crtc_funcs gs101_decon_crtc_funcs = {
 };
 
 /*
- * TODO: decon_reg_get_interrupt_and_clear() (:2229) decodes the status
- * register. On frame done, call drm_crtc_handle_vblank().
+ * Mirrors the useful half of decon_reg_get_interrupt_and_clear() (:2229).
+ *
+ * Interrupts are write-one-to-clear, and clearing has to happen even for bits
+ * nothing acts on yet -- a pending bit left set re-triggers immediately, and a
+ * handler that keeps answering IRQ_NONE gets the line disabled as spurious.
+ *
+ * TODO: once a CRTC exists, frame done calls drm_crtc_handle_vblank(). Until
+ * then this only establishes whether the interrupt fires at all, which is the
+ * one thing that decides whether tear-free page flipping is reachable.
  */
 static irqreturn_t gs101_decon_irq(int irq, void *data)
 {
-	return IRQ_NONE;
+	struct gs101_decon *decon = data;
+	u32 pend;
+
+	pend = readl(decon->regs[DECON_REG_MAIN] + DECON_INT_PEND);
+	if (!pend)
+		return IRQ_NONE;
+
+	/*
+	 * Clear everything that was pending, not just the bits below. A bit we
+	 * do not know about would otherwise stay set, re-trigger immediately
+	 * and storm until the kernel disables the line as spurious. Nothing
+	 * else owns this register.
+	 */
+	writel(pend, decon->regs[DECON_REG_MAIN] + DECON_INT_PEND);
+
+	if (pend & INT_PEND_FRAME_DONE) {
+		/*
+		 * Log the first one and then stay quiet: at 60 Hz this runs
+		 * sixty times a second, and the only question right now is
+		 * whether it runs at all.
+		 */
+		if (!decon->frame_count++)
+			dev_info(decon->dev,
+				 "DECON%u: frame_done interrupt is live\n",
+				 decon->id);
+
+		/*
+		 * num_crtcs is set by drm_vblank_init(), which only runs on
+		 * the way to drm_dev_register(). Without it dev->vblank is
+		 * NULL and drm_crtc_handle_vblank() would dereference it --
+		 * and this interrupt is live from probe, long before any of
+		 * that. The guard goes away when registration is switched on.
+		 */
+		if (decon->crtc.dev && decon->crtc.dev->num_crtcs) {
+			bool handled = drm_crtc_handle_vblank(&decon->crtc);
+
+			/*
+			 * TODO: diagnostic, remove. The interrupt runs at
+			 * 60 Hz but the vblank counter does not advance, so
+			 * either this is never reached or drm_handle_vblank()
+			 * bails on !vblank->enabled.
+			 */
+			if (handled)
+				dev_info_once(decon->dev,
+					      "DECON%u: vblank counter advancing\n",
+					      decon->id);
+			else if (decon->vblank_reports < 3) {
+				decon->vblank_reports++;
+				dev_info(decon->dev,
+					 "DECON%u: handle_vblank -> %d (count %llu, pend %#x, int_en %#x)\n",
+					 decon->id, handled,
+					 drm_crtc_vblank_count(&decon->crtc),
+					 pend,
+					 readl(decon->regs[DECON_REG_MAIN] +
+					       DECON_INT_EN));
+			}
+		} else if (!decon->vblank_reports) {
+			decon->vblank_reports++;
+			dev_info(decon->dev,
+				 "DECON%u: vblank guard closed (dev=%d crtcs=%d)\n",
+				 decon->id, !!decon->crtc.dev,
+				 decon->crtc.dev ? decon->crtc.dev->num_crtcs : -1);
+		}
+	}
+
+	return IRQ_HANDLED;
 }
 
 /* ------------------------------------------------------------------ */
@@ -340,20 +515,34 @@ static int gs101_decon_probe(struct platform_device *pdev)
 		return decon->irq_frame_done;
 
 	/*
-	 * Deliberately not requesting the interrupt here. The bootloader
-	 * leaves the panel scanning out, so DECON may already be raising
-	 * frame-done. A handler that answers IRQ_NONE to a live interrupt
-	 * gets the line disabled with "nobody cared". Request it from
-	 * atomic_enable(), once we own the hardware and can mask it first.
-	 */
-
-	/*
 	 * ioremap succeeding only proves the address was mappable, not that it
 	 * points at DECON. Enable the clocks and read the version register --
 	 * offset 0 of the main bank, read-only, safe to touch while the
 	 * bootloader still has the panel scanning out. A plausible value means
 	 * we are genuinely talking to the hardware.
 	 */
+	/*
+	 * Hold the panel's supplies for as long as this driver is loaded.
+	 *
+	 * They are already on -- the bootloader turned them on and simpledrm
+	 * holds a reference through its own vci-supply/vddi-supply. But taking
+	 * the display over unbinds simpledrm, and when the last user goes away
+	 * the regulator core switches vci_disp off. The panel then stops
+	 * driving TE, DECON never completes another frame, and nothing short
+	 * of a reboot brings it back, because powering the panel up again is
+	 * the bootloader's job.
+	 *
+	 * So this reference has to exist before drm_dev_register() evicts
+	 * simpledrm, which is why it is taken in probe rather than at modeset
+	 * time. regulator_ignore_unused on the command line does not help: it
+	 * only suppresses the boot-time cleanup, not a refcount reaching zero.
+	 */
+	ret = devm_regulator_bulk_get_enable(dev,
+					     ARRAY_SIZE(gs101_decon_supplies),
+					     gs101_decon_supplies);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable panel supplies\n");
+
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(decon->clks), decon->clks);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to enable clocks\n");
@@ -361,22 +550,86 @@ static int gs101_decon_probe(struct platform_device *pdev)
 	dev_info(dev, "DECON%u: version register reads %#010x\n",
 		 decon->id, readl(decon->regs[DECON_REG_MAIN] + DECON_VERSION));
 
-	clk_bulk_disable_unprepare(ARRAY_SIZE(decon->clks), decon->clks);
+	/*
+	 * The bootloader leaves DECON_INT_EN at 0x3000: FRAME_DONE and
+	 * FRAME_START unmasked individually, but INT_EN -- the master enable --
+	 * clear, so nothing is generated and DECON_INT_PEND reads zero. That is
+	 * why requesting this is safe despite the panel still scanning out:
+	 * there is no live interrupt to answer IRQ_NONE to.
+	 *
+	 * Order matters. Request first, then switch the generator on, so the
+	 * first frame has a handler waiting.
+	 *
+	 * TODO: this belongs in enable_vblank() once a CRTC exists. It is here
+	 * because nothing calls enable_vblank() yet, and whether this interrupt
+	 * fires at all decides whether tear-free flipping is reachable.
+	 */
+	ret = devm_request_irq(dev, decon->irq_frame_done, gs101_decon_irq,
+			       0, dev_name(dev), decon);
+	if (ret) {
+		clk_bulk_disable_unprepare(ARRAY_SIZE(decon->clks), decon->clks);
+		return dev_err_probe(dev, ret, "failed to request frame_done irq\n");
+	}
+
+	writel(readl(decon->regs[DECON_REG_MAIN] + DECON_INT_EN) | INT_EN,
+	       decon->regs[DECON_REG_MAIN] + DECON_INT_EN);
+
+	/*
+	 * Clocks stay on from here. The handler touches registers, so the block
+	 * has to remain accessible; dropping them at the end of probe was only
+	 * correct while nothing ran afterwards. pm_runtime should own this once
+	 * atomic_enable()/atomic_disable() do.
+	 */
 
 	return component_add(dev, &gs101_decon_component_ops);
 }
 
 /*
- * TODO: create the CRTC here once a primary plane exists. That needs DPP:
- * drm_crtc_init_with_planes() requires one, so there is nothing useful to
- * register until then. See drm_universal_plane_init() on the DPP side.
+ * The DPPs bind before DECON -- see gs101_drm_component_order -- so by now the
+ * primary plane exists. Only one DPP is described, so taking the first primary
+ * is unambiguous; when L1-L5 arrive they come up as overlays and this still
+ * picks the right one.
  */
+static struct drm_plane *gs101_decon_primary_plane(struct drm_device *drm)
+{
+	struct drm_plane *plane;
+
+	drm_for_each_plane(plane, drm)
+		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
+			return plane;
+
+	return NULL;
+}
+
 static int gs101_decon_bind(struct device *dev, struct device *master,
 			    void *data)
 {
 	struct gs101_decon *decon = dev_get_drvdata(dev);
+	struct drm_device *drm = data;
+	struct drm_plane *primary;
+	int ret;
 
-	dev_info(dev, "DECON%u bound to DRM device\n", decon->id);
+	primary = gs101_decon_primary_plane(drm);
+	if (!primary) {
+		dev_err(dev, "no primary plane; is a DPP node present?\n");
+		return -ENODEV;
+	}
+
+	ret = drm_crtc_init_with_planes(drm, &decon->crtc, primary, NULL,
+					&gs101_decon_crtc_funcs, NULL);
+	if (ret)
+		return ret;
+
+	drm_crtc_helper_add(&decon->crtc, &gs101_decon_crtc_helper_funcs);
+
+	/*
+	 * Now that the CRTC exists the interrupt handler can deliver vblank
+	 * events; until this point it only counted them.
+	 */
+	primary->possible_crtcs = drm_crtc_mask(&decon->crtc);
+
+	dev_info(dev, "DECON%u: CRTC created on plane %s\n",
+		 decon->id, primary->name);
 
 	return 0;
 }

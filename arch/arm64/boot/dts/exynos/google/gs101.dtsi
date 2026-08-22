@@ -593,6 +593,11 @@
 		compatible = "samsung,sysmmu-group";
 	};
 
+	/* DPU's clients: DPP0 today, further planes as they are added. */
+	iommu_group_dpu: iommu-group-dpu {
+		compatible = "samsung,sysmmu-group";
+	};
+
 	/*
 	 * Owns the drm_device and binds the display pipeline together. The
 	 * pieces -- DECON, and later DPP and DSIM -- have their own nodes and
@@ -600,6 +605,23 @@
 	 */
 	display-subsystem {
 		compatible = "google,gs101-display-subsystem";
+
+		/*
+		 * This node carries no registers, but it is the device the DRM
+		 * driver allocates against: gs101_drm_bind() hands it to
+		 * devm_drm_dev_alloc(), and DRM_GEM_DMA_DRIVER_OPS then calls
+		 * dma_alloc_wc(drm->dev). The hardware that fetches those
+		 * buffers is DPP, which translates through sysmmu_dpu0.
+		 *
+		 * Both must therefore sit in the same IOMMU group, so that
+		 * they share one domain and an address handed out here means
+		 * the same thing to DPP. Without this the allocation returns a
+		 * physical address, DPP presents it as an IOVA, nothing maps,
+		 * and the fetch stalls -- silently, since these instances do
+		 * not run in async-fault mode.
+		 */
+		iommus = <&sysmmu_dpu0>;
+		samsung,iommu-group = <&iommu_group_dpu>;
 	};
 
 	soc: soc@0 {
@@ -2022,6 +2044,17 @@
 			interrupts = <GIC_SPI 337 IRQ_TYPE_LEVEL_HIGH 0>;
 			interrupt-names = "frame_done";
 
+			/*
+			 * The vendor makes DECON the IOMMU client for the whole
+			 * DPU -- exynos_drm_decon.c:1979 sets priv->iommu_client
+			 * to this device and every buffer is mapped against it.
+			 * Our DRM device does the mapping instead, but keeping
+			 * DECON in the same group costs nothing and matches the
+			 * reference.
+			 */
+			iommus = <&sysmmu_dpu0>;
+			samsung,iommu-group = <&iommu_group_dpu>;
+
 			clocks = <&cmu_dpu CLK_GOUT_DPU_PCLK>,
 				 <&cmu_dpu CLK_GOUT_DPU_CLK_DPU_BUSP_CLK>,
 				 <&cmu_dpu CLK_GOUT_DPU_CLK_DPU_BUSD_CLK>,
@@ -2063,6 +2096,17 @@
 				      "aclk_dma", "aclk_dpp";
 
 			dpp,id = <0>;
+
+			/*
+			 * DPP0 drives layer L0, which is behind sysmmu_dpu0
+			 * alone. The vendor lists all three SysMMUs on each
+			 * DECON instead, because there the mapping is done
+			 * through DECON; here DPP is the DMA device, which is
+			 * why swiotlb complains in its name and not DECON's.
+			 * dpu1 and dpu2 belong on whichever DPPs come next.
+			 */
+			iommus = <&sysmmu_dpu0>;
+			samsung,iommu-group = <&iommu_group_dpu>;
 		};
 
 		/*
@@ -2083,6 +2127,71 @@
 			reg-names = "dsi";
 
 			dsim,id = <0>;
+		};
+
+		/*
+		 * DPU's SysMMUs, one per pair of DPP layers:
+		 *
+		 *	sysmmu_dpu0	L0/L1
+		 *	sysmmu_dpu1	L2/L3
+		 *	sysmmu_dpu2	L4/L5 and the writeback path
+		 *
+		 * Addresses, interrupts and port assignments are the vendor's
+		 * (gs101-sysmmu.dtsi:185; interrupt numbers from the vendor's
+		 * dt-bindings/interrupt-controller/gs101.h:387, non-secure S1).
+		 *
+		 * The vendor nodes carry power-domains = <&pd_dpu>, a secure
+		 * IRQ with its own secure_base, and per-TLB prefetch tuning.
+		 * None of that is here: mainline gs101 has no power domains
+		 * yet, and samsung-iommu treats the rest as optional.
+		 *
+		 * "gate" is the clock name the driver looks for. It never
+		 * enables it (samsung-iommu.c:1637 stores the clock and no
+		 * caller turns it on), and it reads hardware registers from
+		 * probe in sysmmu_get_hw_info(). So these blocks answer only
+		 * while cmu_dpu is up, which today means while DECON holds it
+		 * -- the same unstated dependency DSIM has.
+		 */
+		sysmmu_dpu0: sysmmu@1c100000 {
+			compatible = "samsung,sysmmu-v8";
+			reg = <0x1c100000 0x10000>;
+			interrupts = <GIC_SPI 370 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 371 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSMMU_DPUD0_CLK_S1>;
+			clock-names = "gate";
+			qos = <15>;
+			sysmmu,secure-irq;
+			sysmmu,secure_base = <0x1c130000>;
+			sysmmu,async-fault;
+			#iommu-cells = <0>;
+		};
+
+		sysmmu_dpu1: sysmmu@1c110000 {
+			compatible = "samsung,sysmmu-v8";
+			reg = <0x1c110000 0x10000>;
+			interrupts = <GIC_SPI 373 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 374 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSMMU_DPUD1_CLK_S1>;
+			clock-names = "gate";
+			qos = <15>;
+			sysmmu,secure-irq;
+			sysmmu,secure_base = <0x1c140000>;
+			sysmmu,async-fault;
+			#iommu-cells = <0>;
+		};
+
+		sysmmu_dpu2: sysmmu@1c120000 {
+			compatible = "samsung,sysmmu-v8";
+			reg = <0x1c120000 0x10000>;
+			interrupts = <GIC_SPI 376 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 377 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSMMU_DPUD2_CLK_S1>;
+			clock-names = "gate";
+			qos = <15>;
+			sysmmu,secure-irq;
+			sysmmu,secure_base = <0x1c150000>;
+			sysmmu,async-fault;
+			#iommu-cells = <0>;
 		};
 
 		cmu_top: clock-controller@1e080000 {

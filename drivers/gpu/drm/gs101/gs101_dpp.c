@@ -31,6 +31,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -73,7 +74,46 @@ enum gs101_dpp_reg_bank {
 #define GLB_DPU_DMA_VERSION	0x0f00
 
 /* regs-dpp.h:173. The luminance base address -- where pixels are fetched. */
+#define RDMA_IN_CTRL_0		0x0008
+#define  IDMA_IMG_FORMAT_MASK	(0x3f << 8)
+#define  IDMA_IMG_FORMAT(v)	((v) << 8)
+
+/*
+ * The vendor names these after the byte order in memory, not after the user
+ * manual's big-endian convention -- regs-dpp.h says so explicitly, because
+ * HAL_PIXEL_FORMAT and the DRM fourccs do the same. So their BGRA8888 is what
+ * DRM calls ARGB8888, and their BGRX8888 is DRM's XRGB8888. Their XRGB8888,
+ * value 7, is something else entirely and not what XR24 means.
+ */
+#define  IMG_FORMAT_BGRA8888	0
+#define  IMG_FORMAT_BGRX8888	4
+
+#define RDMA_SRC_SIZE		0x0010
+#define RDMA_IMG_SIZE		0x0018
 #define RDMA_BASEADDR_Y8	0x0040
+
+/*
+ * Both size registers pack the height into the high half and the width low --
+ * that is what regs-dpp.h says (IDMA_SRC_HEIGHT at 16, IDMA_SRC_WIDTH at 0)
+ * and what the bootloader's 0x09600438 decodes to for a 1080x2400 panel.
+ *
+ * size_swapped exists because writing that layout, verified by reading the
+ * registers back, did not change the picture. Setting it puts the width in the
+ * high half instead, which is wrong according to the header but tests the
+ * header rather than trusting it.
+ */
+static bool size_swapped;
+module_param(size_swapped, bool, 0644);
+MODULE_PARM_DESC(size_swapped,
+		 "Write DPP size registers as width:height instead of height:width");
+
+static u32 rdma_size(u32 w, u32 h)
+{
+	if (size_swapped)
+		return ((w & 0xffff) << 16) | (h & 0xffff);
+
+	return ((h & 0xffff) << 16) | (w & 0xffff);
+}
 
 /*
  * DPP sits behind cmu_dpu just like DECON, and DECON enables these only long
@@ -173,7 +213,9 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 	struct drm_plane_state *new_state =
 		drm_atomic_get_new_plane_state(state, plane);
 	struct gs101_dpp *dpp = plane_to_dpp(plane);
+	struct drm_framebuffer *fb;
 	dma_addr_t addr;
+	u32 src_w, val;
 
 	if (!new_state->fb || !new_state->crtc)
 		return;
@@ -188,12 +230,63 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 	 * at a time is far easier to debug than reinitialising the block and
 	 * finding out which of thirty writes was wrong.
 	 *
-	 * Contiguity is guaranteed: buffers come from DRM_GEM_DMA, and dpp0 has
-	 * no iommus property, so this is a raw physical address. The high half
-	 * is dropped because CMA sits at 0xfe000000, below 4G -- that stops
-	 * being true if a wider buffer pool is ever used.
+	 * RDMA_BASEADDR_Y8 is 32 bits wide and there is no companion register
+	 * for the high half, so whatever ends up here has to fit. dpp0 now has
+	 * an iommus property, which means this is an IOVA rather than a
+	 * physical address -- and iommu-dma allocates downwards from the top of
+	 * the allocating device's DMA mask, so the mask is what keeps it below
+	 * 4G. Warn rather than truncate silently if that ever fails: a dropped
+	 * high half looks exactly like a working driver whose display is dark.
 	 */
-	addr = drm_fb_dma_get_gem_addr(new_state->fb, new_state, 0);
+	fb = new_state->fb;
+
+	/*
+	 * The two size registers are not the same thing, which is what the
+	 * bootloader's identical values hid: SRC_SIZE describes the buffer and
+	 * IMG_SIZE the part of it to display (dpp_reg.c:124 writes src->f_w
+	 * and src->w respectively). There is no stride register in this path --
+	 * the vendor uses those only for SBWC -- so the row length comes from
+	 * SRC_SIZE's width, and padding has to be expressed there.
+	 *
+	 * A framebuffer whose pitch exceeds width * 4 is therefore not a
+	 * problem to reject but a buffer whose full width is pitch / 4. Get
+	 * this wrong and every row starts a few bytes late: the picture shears
+	 * by a pixel or eight per line, colours intact, unreadable.
+	 */
+	src_w = fb->pitches[0] / fb->format->cpp[0];
+
+	dev_info_once(dpp->dev,
+		      "DPP%u: %ux%u in a %u-wide buffer, pitch %u, format %p4cc\n",
+		      dpp->id, fb->width, fb->height, src_w, fb->pitches[0],
+		      &fb->format->format);
+
+	/*
+	 * Stop inheriting the format too. The bootloader left BGRA8888, which
+	 * honours the fourth byte as alpha. An XR24 buffer leaves that byte
+	 * undefined, so wherever userspace happens to store zero the pixel is
+	 * fully transparent -- black in practice, with nothing to suggest the
+	 * fetch itself was fine.
+	 */
+	val = readl(dpp->regs[DPP_REG_DMA] + RDMA_IN_CTRL_0);
+	val &= ~IDMA_IMG_FORMAT_MASK;
+	val |= IDMA_IMG_FORMAT(fb->format->has_alpha ? IMG_FORMAT_BGRA8888
+						     : IMG_FORMAT_BGRX8888);
+	writel(val, dpp->regs[DPP_REG_DMA] + RDMA_IN_CTRL_0);
+
+	writel(rdma_size(src_w, fb->height),
+	       dpp->regs[DPP_REG_DMA] + RDMA_SRC_SIZE);
+	writel(rdma_size(fb->width, fb->height),
+	       dpp->regs[DPP_REG_DMA] + RDMA_IMG_SIZE);
+
+	addr = drm_fb_dma_get_gem_addr(fb, new_state, 0);
+
+	if (upper_32_bits(addr))
+		dev_warn_once(dpp->dev,
+			      "DPP%u: address %pad does not fit RDMA_BASEADDR_Y8\n",
+			      dpp->id, &addr);
+	else
+		dev_info_once(dpp->dev, "DPP%u: scanning out from %pad\n",
+			      dpp->id, &addr);
 
 	writel(lower_32_bits(addr), dpp->regs[DPP_REG_DMA] + RDMA_BASEADDR_Y8);
 }
@@ -245,6 +338,21 @@ static int gs101_dpp_bind(struct device *dev, struct device *master,
 	int ret;
 
 	/*
+	 * Resume the device so its SysMMU comes up with it. samsung-iommu
+	 * links the two with DL_FLAG_PM_RUNTIME (samsung-iommu.c:995), and
+	 * __sysmmu_enable() -- which writes the page table base and turns
+	 * translation on -- runs from the supplier's runtime_resume and
+	 * nowhere else. Without a reference here the SysMMU stays suspended:
+	 * powered and clocked, attached to a domain, but never configured.
+	 * DPP's fetches then enter an MMU that does not know what to do with
+	 * them and stall, with no fault reported, until the vblank wait times
+	 * out.
+	 */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret)
+		return ret;
+
+	/*
 	 * L0 becomes the primary plane. When more DPPs are described, the
 	 * rest should come up as DRM_PLANE_TYPE_OVERLAY.
 	 *
@@ -284,6 +392,7 @@ static int gs101_dpp_bind(struct device *dev, struct device *master,
 static void gs101_dpp_unbind(struct device *dev, struct device *master,
 			     void *data)
 {
+	pm_runtime_put_sync(dev);
 }
 
 static const struct component_ops gs101_dpp_component_ops = {
@@ -380,12 +489,21 @@ static int gs101_dpp_probe(struct platform_device *pdev)
 
 	clk_bulk_disable_unprepare(ARRAY_SIZE(dpp->clks), dpp->clks);
 
+	/*
+	 * Nothing suspends or resumes this device itself -- gs101 has no power
+	 * domains in mainline and the clocks belong to DECON. Runtime PM is
+	 * enabled solely so the device link to the SysMMU has something to
+	 * act on; see gs101_dpp_bind().
+	 */
+	pm_runtime_enable(dev);
+
 	return component_add(dev, &gs101_dpp_component_ops);
 }
 
 static void gs101_dpp_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &gs101_dpp_component_ops);
+	pm_runtime_disable(&pdev->dev);
 }
 
 static const struct of_device_id gs101_dpp_of_match[] = {

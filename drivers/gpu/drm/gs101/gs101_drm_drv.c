@@ -14,6 +14,7 @@
 
 #include <linux/aperture.h>
 #include <linux/component.h>
+#include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
@@ -174,6 +175,19 @@ static int gs101_drm_bind(struct device *dev)
 	struct drm_device *drm;
 	int ret;
 
+	/*
+	 * This device does the allocating -- drm_gem_dma calls
+	 * dma_alloc_wc(drm->dev) -- while DPP does the fetching, and DPP can
+	 * only be told 32 bits of an address. Both sit in one IOMMU group, so
+	 * they share a domain and the IOVA handed out here is what DPP will
+	 * present; bounding it to 32 bits is therefore this device's job, not
+	 * DPP's. Without it iommu-dma is free to allocate above 4G and the
+	 * high half is lost on the way to the register.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return dev_err_probe(dev, ret, "no 32-bit DMA mask\n");
+
 	priv = devm_drm_dev_alloc(dev, &gs101_drm_driver, struct gs101_drm, drm);
 	if (IS_ERR(priv))
 		return PTR_ERR(priv);
@@ -229,6 +243,20 @@ static int gs101_drm_bind(struct device *dev)
 	 */
 	ret = aperture_remove_conflicting_devices(0xfac00000, 1080 * 2400 * 4,
 						  gs101_drm_driver.name);
+	if (ret)
+		return ret;
+
+	/*
+	 * Removing is not enough: it only evicts what exists at this moment.
+	 * simple-framebuffer waits on a regulator ("deferred probe pending:
+	 * wait for supplier .../bucka") and can probe after us, whereupon it
+	 * takes the same memory and registers a second card on the same
+	 * scanout -- which is what happens whenever this module is loaded
+	 * early with modeset=1. Claim the range so a later probe is refused.
+	 */
+	ret = devm_aperture_acquire_for_platform_device(to_platform_device(dev),
+						       0xfac00000,
+						       1080 * 2400 * 4);
 	if (ret)
 		return ret;
 
@@ -364,6 +392,16 @@ static void __exit gs101_drm_exit(void)
 				    ARRAY_SIZE(gs101_drm_drivers));
 }
 module_exit(gs101_drm_exit);
+
+/*
+ * DPP's iommus phandle points at sysmmu_dpu0, but samsung_iommu is an
+ * out-of-tree module that udev loads at roughly the same moment as this one.
+ * Lose that race and the deferred probe timeout has already expired by the
+ * time DPP probes, so the core drops the dependency and binds DPP without an
+ * IOMMU -- silently, save for one "ignoring dependency" line. aoc.c carries
+ * the same declaration for the same reason.
+ */
+MODULE_SOFTDEP("pre: samsung-iommu");
 
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");

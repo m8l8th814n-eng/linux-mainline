@@ -5,7 +5,9 @@
 #ifndef __GS101_DRM_H__
 #define __GS101_DRM_H__
 
+#include <drm/drm_connector.h>
 #include <drm/drm_device.h>
+#include <drm/drm_encoder.h>
 
 /**
  * struct gs101_drm - per-device DRM state

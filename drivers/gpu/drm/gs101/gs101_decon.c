@@ -100,6 +100,21 @@ static const struct component_ops gs101_decon_component_ops;
 #define  SHD_REG_UP_REQ_GLOBAL		BIT(31)
 #define  SHD_REG_UP_REQ_CMP		BIT(20)
 
+/*
+ * The windows latch separately from the global request. The vendor has two
+ * functions for this and calls both: decon_reg_update_req_global() writes
+ * GLOBAL and CMP (decon_reg.c:1800), decon_reg_update_req_window() writes the
+ * window's own bit (:2021). Requesting only the first leaves the window's
+ * shadow registers holding whatever the bootloader latched, no matter what
+ * the plane writes into DPP.
+ *
+ * All six bits are requested rather than just the one in use: the bootloader
+ * drives window 5, not 0, and windows 0-4 read back disabled with empty
+ * geometry, so requesting them costs nothing. Mirrors
+ * decon_reg_all_win_shadow_update_req() (:1972).
+ */
+#define  SHD_REG_UP_REQ_ALL_WIN		GENMASK(5, 0)
+
 #define DECON_INT_PEND			0x0070
 #define  INT_PEND_FRAME_DONE		BIT(13)
 #define  INT_PEND_FRAME_START		BIT(12)
@@ -283,7 +298,8 @@ static void gs101_decon_atomic_flush(struct drm_crtc *crtc,
 	 * that trigger is unmasked, which is the whole reason a single frame
 	 * cannot tear here the way a free-running scanout does.
 	 */
-	writel(SHD_REG_UP_REQ_GLOBAL | SHD_REG_UP_REQ_CMP,
+	writel(SHD_REG_UP_REQ_GLOBAL | SHD_REG_UP_REQ_CMP |
+	       SHD_REG_UP_REQ_ALL_WIN,
 	       main + DECON_SHD_REG_UP_REQ);
 
 	val = readl(main + DECON_TRIG_CON);

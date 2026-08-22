@@ -20,6 +20,30 @@
  * needed to bring DSIM up later -- PLL dividers, D-PHY timing, lane count,
  * command-mode configuration -- is sitting in these registers right now. Read
  * it before anything overwrites it.
+ *
+ * As read on oriole with the bootloader's configuration still live and nothing
+ * of ours written yet:
+ *
+ *	VERSION		0x02060000
+ *	LINK_STATUS0	0x00000000
+ *	LINK_STATUS1	0x04000000	bit 26 alone -- command mode
+ *	LINK_STATUS2	0x00000000
+ *	LINK_STATUS3	0x00000000
+ *	MIPI_STATUS	0x00000000
+ *	DPHY_STATUS	0x0000010f	four data lanes plus clock, all stopped
+ *	CLK_CTRL	0x06131f04	escape clock dividers and lane enables
+ *	ESCMODE		0x01400000
+ *
+ * Command mode is thus confirmed against the hardware rather than inferred from
+ * TRIG_CON, and the link is trained and idle between transfers because the panel
+ * refreshes from its own RAM.
+ *
+ * The version is one revision past anything the vendor layer knows -- dsim_reg.c
+ * names only EVT0 0x02040000 and EVT1 0x02050000. That is inert for now: of its
+ * 2551 lines exactly one branch is version-dependent (dsim_reg_set_vt_compensate,
+ * dsim_reg.c:1397), and it only skips a DSIM_VIDEO_TIMER write that command mode
+ * never reaches. Undocumented layout deltas between 2.5 and 2.6 would first show
+ * up once this driver starts writing.
  */
 
 #include <linux/component.h>
@@ -65,7 +89,7 @@ struct gs101_dsim {
 };
 
 /*
- * A snapshot of the link as the bootloader left it. Logged once at probe
+ * A snapshot of the link as the bootloader left it. Logged once at bind
  * because it is the only chance to see a working configuration -- the moment
  * this driver starts writing, it is gone.
  */
@@ -100,6 +124,19 @@ static void gs101_dsim_dump_state(struct gs101_dsim *dsim)
 static int gs101_dsim_bind(struct device *dev, struct device *master,
 			   void *data)
 {
+	struct gs101_dsim *dsim = dev_get_drvdata(dev);
+
+	/*
+	 * Read the registers here rather than in probe. DSIM has no clocks of
+	 * its own and only answers while DECON holds cmu_dpu enabled, which
+	 * DECON does from its probe. Probe order between the two is not
+	 * guaranteed, and a read of an ungated block does not return an error
+	 * -- it hangs the bus until the watchdog reboots the machine. The
+	 * master binds only once every component has probed, so by this point
+	 * DECON's clocks are on.
+	 */
+	gs101_dsim_dump_state(dsim);
+
 	/*
 	 * TODO: register the DSI host (mipi_dsi_host_register), attach the
 	 * panel, and replace the fixed connector in gs101_drm_drv.c with a
@@ -130,9 +167,9 @@ static const struct component_ops gs101_dsim_component_ops = {
  *	};
  *
  * No clocks: DSIM sits behind cmu_dpu like DECON and DPP, and DECON already
- * holds that set for as long as it is loaded. Reading registers here works
- * because of that, which is a dependency worth making explicit once this
- * driver does more than read.
+ * holds that set for as long as it is loaded. Probe therefore touches no
+ * registers at all -- see gs101_dsim_bind() -- and this node will need its own
+ * clocks before the driver does more than read.
  */
 static int gs101_dsim_probe(struct platform_device *pdev)
 {
@@ -153,8 +190,6 @@ static int gs101_dsim_probe(struct platform_device *pdev)
 	if (IS_ERR(dsim->regs))
 		return dev_err_probe(dev, PTR_ERR(dsim->regs),
 				     "failed to map DSI registers\n");
-
-	gs101_dsim_dump_state(dsim);
 
 	return component_add(dev, &gs101_dsim_component_ops);
 }

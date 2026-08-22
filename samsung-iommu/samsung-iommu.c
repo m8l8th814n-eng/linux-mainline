@@ -1634,10 +1634,20 @@ static int samsung_sysmmu_device_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	data->clk = devm_clk_get(dev, "gate");
-	if (PTR_ERR(data->clk) == -ENOENT) {
-		data->clk = NULL;
-	} else if (IS_ERR(data->clk)) {
+	/*
+	 * Enable the gate before sysmmu_get_hw_info() reads the hardware. The
+	 * DPU instances sit behind cmu_dpu, and a read of an ungated block on
+	 * this SoC does not return an error -- it hangs the bus until the
+	 * watchdog reboots. The vendor never hit this because its nodes carry
+	 * power-domains = <&pd_dpu>, which mainline gs101 does not have yet.
+	 *
+	 * The clock stays on for the driver's lifetime: nothing else here
+	 * manages it, and the register accessors only test pm_runtime_active(),
+	 * which says nothing about the gate without a power domain behind it.
+	 * Instances with no "gate" clock, sysmmu_aoc among them, still probe.
+	 */
+	data->clk = devm_clk_get_optional_enabled(dev, "gate");
+	if (IS_ERR(data->clk)) {
 		dev_err(dev, "failed to get clock!\n");
 		return PTR_ERR(data->clk);
 	}

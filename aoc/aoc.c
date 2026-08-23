@@ -181,6 +181,10 @@ MODULE_PARM_DESC(smc_probe_addr,
 		dev_info(dev, "stage %d: %s\n", (n), what);		\
 	} while (0)
 
+static bool aoc_ignore_watchdog;
+module_param(aoc_ignore_watchdog, bool, 0644);
+MODULE_PARM_DESC(aoc_ignore_watchdog, "Ignore AoC watchdog interrupts entirely");
+
 static bool aoc_disable_restart = false;
 module_param(aoc_disable_restart, bool, 0644);
 MODULE_PARM_DESC(aoc_disable_restart, "Prevent AoC from restarting after crashing.");
@@ -731,6 +735,9 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	if (gsa_enabled) {
 		int rc;
 
+		AOC_STAGE(3, "aoc_configure_iommu()");
+		aoc_configure_iommu(prvdata, fw);
+
 		rc = aoc_fw_authenticate(prvdata, fw);
 		if (rc) {
 			dev_err(dev, "GSA: FW authentication failed: %d\n", rc);
@@ -758,6 +765,13 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	/* start AOC */
 	if (gsa_enabled) {
 		int rc = gsa_send_aoc_cmd(prvdata->gsa_dev, GSA_AOC_START);
+
+		if (rc >= 0 && rc != GSA_AOC_STATE_RUNNING) {
+			rc = gsa_send_aoc_cmd(prvdata->gsa_dev,
+					      GSA_AOC_RELEASE_RESET);
+			dev_info(dev, "GSA release reset: state=%d\n", rc);
+		}
+
 		if (rc < 0 && aoc_stop_at >= 6) {
 			dev_warn(dev, "GSA start unavailable, releasing from reset on the AP\n");
 			aoc_release_from_reset(prvdata);
@@ -1863,6 +1877,12 @@ static void aoc_watchdog(struct work_struct *work)
 	int restart_rc;
 	bool ap_triggered_reset, valid_magic;
 	struct aoc_section_header *crash_info_section;
+
+	if (aoc_ignore_watchdog) {
+		dev_warn(prvdata->dev, "watchdog ignored by module parameter\n");
+		wakeup_source_unregister(ws);
+		return;
+	}
 
 	/* If we're already in SSR state, do nothing. */
 	mutex_lock(&aoc_service_lock);

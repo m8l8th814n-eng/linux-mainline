@@ -2365,6 +2365,7 @@
 
 			gsa-enabled;
 			gsa-device = <&gsa>;
+			iommu-config-persistent;
 
 			/*
 			 * Offsets into the blk_aoc window above. The vendor

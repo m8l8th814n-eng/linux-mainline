@@ -179,17 +179,67 @@ int gsa_unload_aoc_fw_image(struct device *gsa)
 {
 	struct platform_device *pdev = to_platform_device(gsa);
 	struct gsa_dev_state *s = platform_get_drvdata(pdev);
+	int rc;
 
-	return gsa_tz_send_hwmgr_unload_fw_image_cmd(&s->aoc_srv);
+	rc = gsa_send_mbox_cmd(s->mb, GSA_MB_CMD_UNLOAD_AOC_FW_IMG,
+			       NULL, 0, NULL, 0);
+	dev_info(gsa, "AOC unload over mailbox: rc=%d\n", rc);
+
+	return rc < 0 ? rc : 0;
 }
 EXPORT_SYMBOL_GPL(gsa_unload_aoc_fw_image);
+
+static struct gsa_dev_state *gsa_probe_state;
+
+static int gsa_aoc_cmd_set(const char *val, const struct kernel_param *kp)
+{
+	u32 req, rsp = 0;
+	int rc;
+
+	if (!gsa_probe_state)
+		return -ENODEV;
+
+	rc = kstrtou32(val, 0, &req);
+	if (rc)
+		return rc;
+
+	rc = gsa_send_mbox_cmd(gsa_probe_state->mb, GSA_MB_CMD_AOC_CMD,
+			       &req, 1, &rsp, 1);
+	pr_info("gsa: aoc_cmd %u -> rc=%d rsp=%#x\n", req, rc, rsp);
+
+	return 0;
+}
+
+static const struct kernel_param_ops gsa_aoc_cmd_ops = {
+	.set = gsa_aoc_cmd_set,
+};
+module_param_cb(aoc_cmd, &gsa_aoc_cmd_ops, NULL, 0200);
+MODULE_PARM_DESC(aoc_cmd, "Send a raw AOC management command over the GSA mailbox");
 
 int gsa_send_aoc_cmd(struct device *gsa, enum gsa_aoc_cmd arg)
 {
 	struct platform_device *pdev = to_platform_device(gsa);
 	struct gsa_dev_state *s = platform_get_drvdata(pdev);
+	u32 req = arg;
+	u32 rsp = 0;
+	int rc;
 
-	return gsa_tz_send_hwmgr_state_cmd(&s->aoc_srv, arg);
+	if (arg != GSA_AOC_GET_STATE) {
+		u32 probe = GSA_AOC_GET_STATE;
+		u32 state = 0;
+		int prc = gsa_send_mbox_cmd(s->mb, GSA_MB_CMD_AOC_CMD,
+					    &probe, 1, &state, 1);
+
+		dev_info(gsa, "AOC state before cmd %u: rc=%d state=%#x\n",
+			 arg, prc, state);
+	}
+
+	rc = gsa_send_mbox_cmd(s->mb, GSA_MB_CMD_AOC_CMD, &req, 1, &rsp, 1);
+	dev_info(gsa, "AOC_CMD %u over mailbox: rc=%d rsp=%#x\n", arg, rc, rsp);
+	if (rc < 0)
+		return rc;
+
+	return rsp;
 }
 EXPORT_SYMBOL_GPL(gsa_send_aoc_cmd);
 
@@ -819,6 +869,7 @@ static int gsa_probe(struct platform_device *pdev)
 	s->dev = dev;
 	mutex_init(&s->bb_lock);
 	platform_set_drvdata(pdev, s);
+	gsa_probe_state = s;
 
 	/*
 	 * Set DMA mask and coherent to 36-bit as it is what GSA supports.

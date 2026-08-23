@@ -1,21 +1,15 @@
 # SPDX-License-Identifier: GPL-2.0
-#
-# ASoC-based ALSA driver gluing all the audio amplifier drivers
-#
 
-# Only one of them exists at build time, depending on :radio flag.
-ccflags-$(CONFIG_RADIO_S5300) += -I$(srctree)/../private/google-modules/radio/samsung/s5300
-ccflags-$(CONFIG_RADIO_S5400) += -I$(srctree)/../private/google-modules/radio/samsung/s5400
-ccflags-y += -I$(srctree)/../private/google-modules/aoc_ipc
-ccflags-y += -I$(srctree)/../private/google-modules/aoc
-ccflags-y += -I$(srctree)/../private/google-modules/amplifiers/audiometrics
+ccflags-y += -I$(srctree)/aoc
+ccflags-y += -I$(srctree)/aoc_ipc
+ccflags-y += -I$(srctree)/vendor-stub-include
 ccflags-y += -I$(srctree)/sound/usb
+ccflags-y += -DCONFIG_SOC_GS101=1
 
 obj-$(CONFIG_AOC_DRIVER)	+= aoc_alsa_dev.o
 obj-$(CONFIG_AOC_DRIVER)	+= aoc_alsa_dev_util.o
 aoc_alsa_dev_util-objs		:= aoc_alsa_path.o aoc_alsa_drv.o \
 				   aoc_alsa_pcm.o aoc_alsa_voice.o \
 				   aoc_alsa_compr.o aoc_alsa_ctl.o aoc_alsa_hw.o \
-				   aoc_alsa_nohost.o aoc_alsa_incall.o  aoc_alsa_voip.o
+				   aoc_alsa_nohost.o aoc_alsa_incall.o aoc_alsa_voip.o
 aoc_alsa_dev-objs		:= aoc_alsa_card.o
-

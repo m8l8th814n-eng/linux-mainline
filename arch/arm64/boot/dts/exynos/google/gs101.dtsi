@@ -567,9 +567,11 @@
 			no-map;
 		};
 
-		debug_kinfo_reserved: debug-kinfo-reserved@fd3fe000 {
-			reg = <0x0 0xfd3fe000 0x00001000>;
-			no-map;
+		ramoops@fd3ff000 {
+			compatible = "ramoops";
+			reg = <0x0 0xfd3ff000 0x00400000>;
+			record-size = <0x40000>;
+			console-size = <0x200000>;
 		};
 
 		bldr_log_reserved: bldr-log-reserved@fd800000 {

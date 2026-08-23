@@ -36,3 +36,9 @@
 	fts,x-max = <1080>;
 	fts,y-max = <2400>;
 };
+
+&aoc {
+	aoc-board-cfg = "b3";
+	aoc-board-id = <0x20501>;
+	aoc-board-rev = <0x10000>;
+};

@@ -1918,6 +1918,12 @@
 			reg = <0x17420000 0x10000>;
 		};
 
+		gsa: gsa-ns@17c90000 {
+			compatible = "google,gs101-gsa-v1";
+			reg = <0x17c90000 0x1000>;
+			interrupts = <GIC_SPI 447 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
 		pmu_system_controller: system-controller@17460000 {
 			compatible = "google,gs101-pmu";
 			reg = <0x17460000 0x10000>;
@@ -2356,6 +2362,9 @@
 
 			acpm-ipc-channel = <13>;
 			force-vnom = <0>;
+
+			gsa-enabled;
+			gsa-device = <&gsa>;
 
 			/*
 			 * Offsets into the blk_aoc window above. The vendor

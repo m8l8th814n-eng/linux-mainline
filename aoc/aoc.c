@@ -29,6 +29,7 @@
 #include <linux/iommu.h>
 #include <linux/jiffies.h>
 #include <linux/list.h>
+#include <linux/arm-smccc.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of.h>
@@ -133,6 +134,42 @@ static int aoc_stop_at = 0;
 module_param(aoc_stop_at, int, 0644);
 MODULE_PARM_DESC(aoc_stop_at,
 		 "Stop the firmware boot sequence after stage N (0-6, default 0)");
+
+#define AOC_SMC_CMD_PRIV_REG		0x82000504
+#define AOC_PRIV_REG_OPTION_READ	0
+#define AOC_SMC_CMD_REG			((unsigned long)-101)
+#define AOC_SMC_REG_CLASS_SFR_R		(0x3UL << 30)
+#define AOC_SMC_REG_ID_SFR_R(a)		(AOC_SMC_REG_CLASS_SFR_R | ((a) >> 2))
+
+static int aoc_smc_probe_set(const char *val, const struct kernel_param *kp)
+{
+	struct arm_smccc_res res;
+	unsigned long addr;
+	int rc;
+
+	rc = kstrtoul(val, 0, &addr);
+	if (rc)
+		return rc;
+
+	arm_smccc_smc(AOC_SMC_CMD_PRIV_REG, addr, AOC_PRIV_REG_OPTION_READ,
+		      0, 0, 0, 0, 0, &res);
+	pr_info("aoc: priv_reg %#lx -> a0=%#lx a2=%#lx\n",
+		addr, res.a0, res.a2);
+
+	arm_smccc_smc(AOC_SMC_CMD_REG, AOC_SMC_REG_ID_SFR_R(addr),
+		      0, 0, 0, 0, 0, 0, &res);
+	pr_info("aoc: readsfr  %#lx -> a0=%#lx a2=%#lx\n",
+		addr, res.a0, res.a2);
+
+	return 0;
+}
+
+static const struct kernel_param_ops aoc_smc_probe_ops = {
+	.set = aoc_smc_probe_set,
+};
+module_param_cb(smc_probe_addr, &aoc_smc_probe_ops, NULL, 0200);
+MODULE_PARM_DESC(smc_probe_addr,
+		 "Read a physical address through the EL3 privileged register SMC");
 
 #define AOC_STAGE(n, what)						\
 	do {								\
@@ -721,7 +758,10 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	/* start AOC */
 	if (gsa_enabled) {
 		int rc = gsa_send_aoc_cmd(prvdata->gsa_dev, GSA_AOC_START);
-		if (rc < 0) {
+		if (rc < 0 && aoc_stop_at >= 6) {
+			dev_warn(dev, "GSA start unavailable, releasing from reset on the AP\n");
+			aoc_release_from_reset(prvdata);
+		} else if (rc < 0) {
 			dev_err(dev, "GSA: Failed to start AOC: %d\n", rc);
 			goto free_fw;
 		}

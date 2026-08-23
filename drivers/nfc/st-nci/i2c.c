@@ -273,6 +273,14 @@ static const struct of_device_id of_st_nci_i2c_match[] __maybe_unused = {
 	{ .compatible = "st,st21nfcb-i2c", },
 	{ .compatible = "st,st21nfcb_i2c", },
 	{ .compatible = "st,st21nfcc-i2c", },
+	/*
+	 * The part in a Pixel 6. Google's own driver binds "st,st21nfc" and
+	 * carries a pile of properties this one has no use for -- a reference
+	 * clock, a clock-request line, a power-idle line. What is left is NCI
+	 * over I2C with a reset GPIO, which is what this driver speaks, so it
+	 * is worth finding out whether the rest was ever necessary.
+	 */
+	{ .compatible = "st,st21nfc", },
 	{}
 };
 MODULE_DEVICE_TABLE(of, of_st_nci_i2c_match);

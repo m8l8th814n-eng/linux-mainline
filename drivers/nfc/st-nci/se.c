@@ -621,6 +621,18 @@ int st_nci_discover_se(struct nci_dev *ndev)
 	int se_count = 0;
 	struct st_nci_info *info = nci_get_drvdata(ndev);
 
+	/*
+	 * The ST21NFC in a Pixel 6 answers the HCI network init with proprietary
+	 * notifications this stack does not understand (opcode 0xe3e), and the
+	 * request times out after flooding the log with 6f-02 frames. That path
+	 * only exists to reach the secure element, whose protocol is Google's
+	 * own and unported. Skip it: reader and host-card-emulation modes are
+	 * pure NCI against the controller and do not need it.
+	 */
+	if (!info->se_info.se_status->is_uicc_present &&
+	    !info->se_info.se_status->is_ese_present)
+		return 0;
+
 	r = st_nci_hci_network_init(ndev);
 	if (r != 0)
 		return r;

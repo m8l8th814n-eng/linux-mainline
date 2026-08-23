@@ -65,12 +65,15 @@ static const struct drm_mode_config_funcs gs101_drm_mode_config_funcs = {
  * pixels on the panel. If the takeover does not work the screen goes black and
  * stays black across reboots, because the module loads every boot.
  *
- * Behind a parameter, recovery is rebooting without it. Turn it on with
- * gs101_drm.modeset=1 once there is reason to believe it works.
+ * It defaulted to off while the takeover was unreliable, so that recovery was
+ * rebooting without the parameter. It now defaults to on: the takeover works,
+ * and needing gs101_drm.modeset=1 on every boot is worse than the risk it was
+ * guarding against. Recovery is gs101_drm.modeset=0, or booting a kernel where
+ * simple-framebuffer is still enabled.
  */
-static bool gs101_drm_modeset;
+static bool gs101_drm_modeset = true;
 module_param_named(modeset, gs101_drm_modeset, bool, 0444);
-MODULE_PARM_DESC(modeset, "take over the display from simpledrm (default: no)");
+MODULE_PARM_DESC(modeset, "drive the display rather than leaving it to simpledrm (default: yes)");
 
 /*
  * The panel is already running: the bootloader initialised it and left it
@@ -221,7 +224,7 @@ static int gs101_drm_bind(struct device *dev)
 
 	if (!gs101_drm_modeset) {
 		dev_info(dev,
-			 "components bound; not registering (gs101_drm.modeset=1 to take over)\n");
+			 "components bound; not registering (gs101_drm.modeset=0 given)\n");
 		return 0;
 	}
 

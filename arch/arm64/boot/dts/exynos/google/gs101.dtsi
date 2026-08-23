@@ -2206,6 +2206,26 @@
 		gpu: gpu@1c500000 {
 			compatible = "google,gs101-mali", "arm,mali-valhall-jm";
 			reg = <0x1c500000 0x5000>;
+
+			/*
+			 * The oscillator, deliberately, and it means the GPU
+			 * runs at 24.576 MHz. The real clock is an ACPM DVFS
+			 * one, <&acpm_ipc GS101_CLK_ACPM_DVFS_G3D>, which the
+			 * vendor selects through gpu1_cmu_cal_id rather than a
+			 * phandle; clk_summary shows g3d and g3dl2 sitting at
+			 * 151 MHz with an enable count of zero while oscclk has
+			 * 1c500000.gpu as its consumer.
+			 *
+			 * Switching to it was tried and reverted: the GPU then
+			 * runs at 151 MHz on whatever voltage the bootloader
+			 * left, because nothing couples frequency to the
+			 * regulator. panfrost's devfreq, which would do that,
+			 * bails out with "More than 1 supply is not supported
+			 * yet" -- gs101_data in its compatible table declares
+			 * several. The device dies under load as a result.
+			 *
+			 * So this line waits on GPU DVFS, not on the clock.
+			 */
 			clocks = <&ext_24_5m>;
 			interrupt-names = "job", "mmu", "gpu";
 			interrupts = <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>,

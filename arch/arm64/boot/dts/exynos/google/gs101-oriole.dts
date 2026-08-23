@@ -42,12 +42,19 @@
 	status = "okay";
 };
 
+/*
+ * Left disabled: gs101_drm drives this panel now, and a second driver on the
+ * same memory made every display measurement ambiguous -- which card modetest
+ * opened, which framebuffer the picture came from. The properties stay so the
+ * node can be turned back on with one word if the DRM driver is ever out of
+ * action. Note that raven and bluejay still enable theirs.
+ */
 &framebuffer0 {
 	width = <1080>;
 	height = <2400>;
 	stride = <(1080 * 4)>;
 	format = "a8r8g8b8";
-	status = "okay";
+	status = "disabled";
 };
 
 /*

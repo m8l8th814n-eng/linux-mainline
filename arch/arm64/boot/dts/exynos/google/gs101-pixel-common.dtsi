@@ -973,6 +973,11 @@
 	status = "okay";
 };
 
+&usi7 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
 &usi11 {
 	samsung,mode = <USI_MODE_SPI>;
 	status = "okay";
@@ -981,6 +986,32 @@
 &usi12 {
 	samsung,mode = <USI_MODE_I2C>;
 	status = "okay";
+};
+
+/*
+ * NFC. The part is an ST21NFC on USI7, and the vendor binds it with its own
+ * driver and a set of properties mainline's st-nci knows nothing about: a
+ * reference clock from the PMU, a clock-request line and a power-idle line
+ * (gs101-whitefin-nfc.dtsi). What remains is NCI over I2C with a reset GPIO.
+ *
+ * Untested. If the chip needs the clock or the idle handshake before it will
+ * talk, this node will bind and then time out, and the missing pieces are in
+ * the vendor fragment.
+ */
+&hsi2c_7 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clock-frequency = <370000>;
+	status = "okay";
+
+	nfc@8 {
+		compatible = "st,st21nfc";
+		reg = <0x08>;
+
+		interrupt-parent = <&gpa8>;
+		interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;
+		reset-gpios = <&gpp24 2 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &watchdog_cl0 {

@@ -36,12 +36,22 @@
 #define PCB_FRAME_CRC_INFO_NOTPRESENT	0x00
 #define PCB_FRAME_CRC_INFO_MASK		PCB_FRAME_CRC_INFO_PRESENT
 
+/*
+ * print_hex_dump(KERN_DEBUG, ...) is not gated by dynamic debug -- it writes
+ * every frame to the ring buffer unconditionally, which on the Pixel 6's
+ * ST21NFC is a flood, since the chip streams proprietary notifications
+ * continuously. print_hex_dump_debug() is the gated equivalent: silent unless
+ * the call site is switched on, so nothing is lost and nothing is rebuilt.
+ *
+ * To watch the frames and capture them to a file:
+ *   echo -n 'file drivers/nfc/st-nci/ndlc.c +p' \
+ *        > /sys/kernel/debug/dynamic_debug/control
+ *   dmesg -w | grep ndlc > /tmp/ndlc.log
+ * and '-p' on the same control line turns it back off.
+ */
 #define NDLC_DUMP_SKB(info, skb)                                 \
-do {                                                             \
-	pr_debug("%s:\n", info);                                 \
-	print_hex_dump(KERN_DEBUG, "ndlc: ", DUMP_PREFIX_OFFSET, \
-			16, 1, skb->data, skb->len, 0);          \
-} while (0)
+	print_hex_dump_debug("ndlc: ", DUMP_PREFIX_OFFSET,       \
+			     16, 1, skb->data, skb->len, 0)
 
 int ndlc_open(struct llt_ndlc *ndlc)
 {

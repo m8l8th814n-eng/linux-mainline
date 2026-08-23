@@ -121,12 +121,6 @@
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 	};
 
-	uart16_bus: uart16-bus-pins {
-		samsung,pins = "gpa3-0", "gpa3-1", "gpa3-2", "gpa3-3";
-		samsung,pin-function = <GS101_PIN_FUNC_2>;
-		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
-	};
-
 	uart17_bus: uart17-bus-pins {
 		samsung,pins = "gpa4-0", "gpa4-1", "gpa4-2", "gpa4-3";
 		samsung,pin-function = <GS101_PIN_FUNC_2>;
@@ -145,6 +139,13 @@
 		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+
+	/* The Bluetooth UART (BCM4389) -- APM_USI1_UART on gpa3. */
+	uart16_bus: uart16-bus-pins {
+		samsung,pins = "gpa3-0", "gpa3-1", "gpa3-2", "gpa3-3";
+		samsung,pin-function = <GS101_PIN_FUNC_2>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 	};
 };
 

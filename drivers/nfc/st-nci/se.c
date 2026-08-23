@@ -622,12 +622,18 @@ int st_nci_discover_se(struct nci_dev *ndev)
 	struct st_nci_info *info = nci_get_drvdata(ndev);
 
 	/*
-	 * The ST21NFC in a Pixel 6 answers the HCI network init with proprietary
-	 * notifications this stack does not understand (opcode 0xe3e), and the
-	 * request times out after flooding the log with 6f-02 frames. That path
-	 * only exists to reach the secure element, whose protocol is Google's
-	 * own and unported. Skip it: reader and host-card-emulation modes are
-	 * pure NCI against the controller and do not need it.
+	 * The ST54J in a Pixel 6 answers st_nci_hci_network_init with proprietary
+	 * notifications this stack does not parse (opcode 0xe3e) and times out,
+	 * flooding the log with 6f-02 frames. That init only exists to reach the
+	 * secure element, whose HCI protocol is Google's own and unported. Skip it
+	 * when no SE is declared: reader and host-card-emulation are pure NCI
+	 * against the controller and do not need it.
+	 *
+	 * This is not the whole story of that chip -- it also sits in a loader
+	 * state and would want a signed firmware update, which the kernel does
+	 * not drive (st-nci only exposes FWUPD_START/STOP as vendor commands for
+	 * userspace). But the controller already talks NCI, so skipping SE
+	 * discovery is enough to let dev_up complete and RF discovery start.
 	 */
 	if (!info->se_info.se_status->is_uicc_present &&
 	    !info->se_info.se_status->is_ese_present)

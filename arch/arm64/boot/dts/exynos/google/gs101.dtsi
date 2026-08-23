@@ -20,6 +20,7 @@
 	interrupt-parent = <&gic>;
 
 	aliases {
+		serial16 = &serial_16;
 		pinctrl0 = &pinctrl_gpio_alive;
 		pinctrl1 = &pinctrl_far_alive;
 		pinctrl2 = &pinctrl_gsacore;
@@ -2201,6 +2202,58 @@
 
 			clocks = <&ext_24_5m>;
 			clock-names = "oscclk";
+		};
+
+		/*
+		 * Bluetooth UART for the BCM4389 combo chip. Unlike the other
+		 * serials this one is a standalone block in the always-on APM
+		 * domain (BLK_ALIVE, APM_USI1_UART at 0x175b0000), clocked by
+		 * cmu_apm rather than cmu_peric. WiFi already powers the chip
+		 * through wl_reg_on; Bluetooth has its own bt_reg_on line.
+		 *
+		 * The child binds mainline's btbcm/hci_uart over serdev instead
+		 * of the vendor's out-of-tree "goog,nitrous" wrapper. btbcm has
+		 * no 4389 entry; brcm,bcm4349-bt is the nearest and the closest
+		 * generation. Firmware is a .hcd patch file already in
+		 * /lib/firmware/brcm.
+		 */
+		usi_uart_bt: usi@175b00c0 {
+			compatible = "google,gs101-usi", "samsung,exynos850-usi";
+			reg = <0x175b00c0 0x20>;
+			ranges;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			clocks = <&cmu_apm CLK_GOUT_APM_APM_USI1_UART_PCLK>,
+				 <&cmu_apm CLK_GOUT_APM_CLK_APM_USI1_UART_CLK>;
+			clock-names = "pclk", "ipclk";
+			assigned-clocks = <&cmu_apm CLK_MOUT_APM_FUNC>;
+			assigned-clock-parents = <&cmu_apm CLK_MOUT_APM_FUNCSRC>;
+			samsung,sysreg = <&sysreg_apm 0x4e4>;
+			samsung,mode = <USI_MODE_UART>;
+			status = "okay";
+
+			serial_16: serial@175b0000 {
+				compatible = "google,gs101-uart";
+				reg = <0x175b0000 0xc0>;
+				interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH 0>;
+				clocks = <&cmu_apm CLK_GOUT_APM_APM_USI1_UART_PCLK>,
+					 <&cmu_apm CLK_GOUT_APM_CLK_APM_USI1_UART_CLK>;
+				clock-names = "uart", "clk_uart_baud0";
+				samsung,uart-fifosize = <256>;
+				current-speed = <115200>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&uart16_bus>;
+				status = "okay";
+
+				bluetooth {
+					compatible = "brcm,bcm4349-bt";
+					shutdown-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
+					device-wakeup-gpios = <&gpp14 3 GPIO_ACTIVE_HIGH>;
+					host-wakeup-gpios = <&gpa6 6 GPIO_ACTIVE_HIGH>;
+					current-speed = <3000000>;
+					max-speed = <3000000>;
+				};
+			};
 		};
 
 		gpu: gpu@1c500000 {

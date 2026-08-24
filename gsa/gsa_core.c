@@ -259,8 +259,13 @@ int gsa_unload_tpu_fw_image(struct device *gsa)
 {
 	struct platform_device *pdev = to_platform_device(gsa);
 	struct gsa_dev_state *s = platform_get_drvdata(pdev);
+	int rc;
 
-	return gsa_tz_send_hwmgr_unload_fw_image_cmd(&s->tpu_srv);
+	rc = gsa_send_mbox_cmd(s->mb, GSA_MB_CMD_UNLOAD_TPU_FW_IMG,
+			       NULL, 0, NULL, 0);
+	dev_info(gsa, "TPU unload over mailbox: rc=%d\n", rc);
+
+	return rc < 0 ? rc : 0;
 }
 EXPORT_SYMBOL_GPL(gsa_unload_tpu_fw_image);
 
@@ -268,8 +273,16 @@ int gsa_send_tpu_cmd(struct device *gsa, enum gsa_tpu_cmd arg)
 {
 	struct platform_device *pdev = to_platform_device(gsa);
 	struct gsa_dev_state *s = platform_get_drvdata(pdev);
+	u32 req = arg;
+	u32 rsp = 0;
+	int rc;
 
-	return gsa_tz_send_hwmgr_state_cmd(&s->tpu_srv, arg);
+	rc = gsa_send_mbox_cmd(s->mb, GSA_MB_CMD_TPU_CMD, &req, 1, &rsp, 1);
+	dev_info(gsa, "TPU_CMD %u over mailbox: rc=%d rsp=%#x\n", arg, rc, rsp);
+	if (rc < 0)
+		return rc;
+
+	return rsp;
 }
 EXPORT_SYMBOL_GPL(gsa_send_tpu_cmd);
 

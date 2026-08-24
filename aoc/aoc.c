@@ -181,6 +181,14 @@ MODULE_PARM_DESC(smc_probe_addr,
 		dev_info(dev, "stage %d: %s\n", (n), what);		\
 	} while (0)
 
+static int aoc_force_magic_set(const char *val, const struct kernel_param *kp);
+
+static const struct kernel_param_ops aoc_force_magic_ops = {
+	.set = aoc_force_magic_set,
+};
+module_param_cb(aoc_force_magic, &aoc_force_magic_ops, NULL, 0200);
+MODULE_PARM_DESC(aoc_force_magic, "Write AOC_MAGIC into the IPC block by hand");
+
 static bool aoc_ignore_watchdog;
 module_param(aoc_ignore_watchdog, bool, 0644);
 MODULE_PARM_DESC(aoc_ignore_watchdog, "Ignore AoC watchdog interrupts entirely");
@@ -281,6 +289,18 @@ phys_addr_t aoc_dram_translate_to_aoc(struct aoc_prvdata *p,
 bool aoc_fw_ready(void)
 {
 	return aoc_control != NULL && aoc_control->magic == AOC_MAGIC;
+}
+
+static int aoc_force_magic_set(const char *val, const struct kernel_param *kp)
+{
+	if (!aoc_control)
+		return -ENODEV;
+
+	pr_info("aoc: ipc magic was %#x, forcing %#x\n", aoc_control->magic,
+		AOC_MAGIC);
+	aoc_control->magic = AOC_MAGIC;
+
+	return 0;
 }
 
 static int driver_matches_service_by_name(struct device_driver *drv, void *name)
@@ -420,6 +440,8 @@ static void aoc_mbox_rx_callback(struct mbox_client *cl, void *mssg)
 
 	switch (aoc_state) {
 	case AOC_STATE_FIRMWARE_LOADED:
+		pr_info_ratelimited("aoc: ipc at %p magic=%#x\n", aoc_control,
+				    aoc_control ? aoc_control->magic : 0);
 		if (aoc_fw_ready()) {
 			aoc_state = AOC_STATE_STARTING;
 			schedule_work(&prvdata->online_work);
@@ -1929,10 +1951,8 @@ static void aoc_watchdog(struct work_struct *work)
 	dev_err(prvdata->dev, "holding %s wakelock for 10 sec\n", ws->name);
 	pm_wakeup_ws_event(ws, 10000, true);
 
-	if (!sscd_pdata.sscd_report) {
-		dev_err(prvdata->dev, "aoc coredump failed: no sscd driver\n");
-		goto err_coredump;
-	}
+	if (!sscd_pdata.sscd_report)
+		dev_err(prvdata->dev, "no sscd driver, reading crash reason only\n");
 
 	if (ap_triggered_reset) {
 		dev_info(prvdata->dev, "AP triggered reset, reason: [%s]",
@@ -2041,7 +2061,9 @@ static void aoc_watchdog(struct work_struct *work)
 	 * coredump. Retry sscd_report() with a sleep to handle the race condition
 	 * where AoC crashes before the userspace daemon starts running.
 	 */
-	for (i = 0; i <= sscd_retries; i++) {
+	dev_err(prvdata->dev, "aoc crash info: %s\n", crash_info);
+
+	for (i = 0; sscd_pdata.sscd_report && i <= sscd_retries; i++) {
 		sscd_rc = sscd_pdata.sscd_report(&sscd_dev, sscd_info.segs,
 						 sscd_info.seg_count,
 						 SSCD_FLAGS_ELFARM64HDR,

@@ -596,6 +596,14 @@
 		compatible = "samsung,sysmmu-group";
 	};
 
+	iommu_group_tpu: iommu-group-tpu {
+		compatible = "samsung,sysmmu-group";
+	};
+
+	tpu_cooling: tpu-cooling {
+		#cooling-cells = <2>;
+	};
+
 	/* DPU's clients: DPP0 today, further planes as they are added. */
 	iommu_group_dpu: iommu-group-dpu {
 		compatible = "samsung,sysmmu-group";
@@ -2205,7 +2213,7 @@
 
 		cmu_top: clock-controller@1e080000 {
 			compatible = "google,gs101-cmu-top";
-			reg = <0x1e080000 0x10000>;
+			reg = <0x1e080000 0x8000>;
 			#clock-cells = <1>;
 
 			clocks = <&ext_24_5m>;
@@ -2323,6 +2331,47 @@
 			qos = <15>;
 			sysmmu,async-fault;
 			#iommu-cells = <0>;
+		};
+
+		sysmmu_tpu: sysmmu@1cc40000 {
+			compatible = "samsung,sysmmu-v8";
+			reg = <0x1cc40000 0x10000>;
+			interrupts = <GIC_SPI 691 IRQ_TYPE_LEVEL_HIGH 0>;
+			qos = <15>;
+			#iommu-cells = <0>;
+		};
+
+		edgetpu: abrolhos@1ce00000 {
+			compatible = "google,edgetpu-gs101";
+			reg = <0x1ce00000 0x200000>,
+			      <0x1ccf0000 0x10000>;
+			reg-names = "tpu", "ssmt";
+			interrupts = <GIC_SPI 687 IRQ_TYPE_LEVEL_HIGH 0>;
+
+			#dma-address-cells = <1>;
+			#dma-size-cells = <1>;
+			dma-window = <0x18000000 0xe7fff000>;
+
+			hardware-id = <0x0 0xb>;
+			iommus = <&sysmmu_tpu>;
+			samsung,iommu-group = <&iommu_group_tpu>;
+			memory-region = <&tpu_fw_reserved>;
+
+			csr-iova = <0x17690000>;
+			csr-phys = <0x17690000>;
+			csr-size = <0x10000>;
+
+			gsa-device = <&gsa>;
+
+			tpu_dvfs_table_size = <6 2>;
+			tpu_dvfs_table = <
+				1024000   4819
+				 967000   4101
+				 836000   3085
+				 627000   1916
+				 455000   1213
+				 226000      0
+			>;
 		};
 
 		/*

@@ -6,13 +6,17 @@ config DRM_GS101
 	select DRM_CLIENT_SELECTION
 	select DRM_GEM_DMA_HELPER
 	select DRM_KMS_HELPER
+	select DRM_MIPI_DSI
+	select DRM_PANEL_BRIDGE
 	help
 	  Display support for the Google gs101 SoC used in Pixel 6.
 
 	  Work in progress. DECON and DPP map their registers, take their
 	  clocks and build a CRTC with one plane, driven by the frame-done
-	  interrupt. There is no DSIM and no panel driver, so the panel has
-	  to have been left running by the bootloader.
+	  interrupt. DSIM registers a DSI host and carries DCS commands over
+	  the link the bootloader trained, but does not program the PLL or the
+	  D-PHY. There is no panel driver yet, so the panel still has to have
+	  been left running by the bootloader.
 
 	  Taking the display over from simpledrm is off unless the module
 	  parameter modeset=1 is given.

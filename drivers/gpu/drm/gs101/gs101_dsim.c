@@ -2,7 +2,8 @@
 /*
  * DSIM (MIPI DSI host) for Google gs101 / Tensor G1.
  *
- * SKELETON -- maps registers and reads state. Writes nothing.
+ * Maps registers, reads state, and carries DCS commands over the link the
+ * bootloader trained. Does not program the PLL, the D-PHY or the lanes.
  *
  * gs101's DSIM is not the one mainline already supports. drivers/gpu/drm/
  * bridge/samsung-dsim.c covers exynos3250 through exynos7870 and i.MX8M, but
@@ -48,10 +49,12 @@
 
 #include <linux/component.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 
+#include <drm/drm_mipi_dsi.h>
 #include <drm/drm_print.h>
 
 #include "gs101_drm.h"
@@ -78,6 +81,19 @@
 #define DSIM_DPHY_STATUS	0x001c
 #define DSIM_CLK_CTRL		0x0020
 #define DSIM_ESCMODE		0x002c
+#define  ESCMODE_CMD_LPDT		BIT(7)
+#define DSIM_INTSRC		0x0050
+#define  INTSRC_SFR_PL_FIFO_EMPTY	BIT(29)
+#define  INTSRC_SFR_PH_FIFO_EMPTY	BIT(28)
+#define  INTSRC_SFR_PH_FIFO_OVERFLOW	BIT(27)
+#define DSIM_PKTHDR		0x0058
+#define  PKTHDR_DATA1(x)		((x) << 16)
+#define  PKTHDR_DATA0(x)		((x) << 8)
+#define  PKTHDR_ID(x)			((x) << 0)
+#define DSIM_PAYLOAD		0x005c
+#define DSIM_FIFOCTRL		0x0068
+#define  FIFOCTRL_FULL_PH_SFR		BIT(11)
+#define  FIFOCTRL_FULL_PL_SFR		BIT(9)
 
 /* dsim_cal.h:54 -- command mode is reported here, bit 26. */
 #define LINK_STATUS1_CMD_MODE_STATUS	BIT(26)
@@ -86,7 +102,14 @@ struct gs101_dsim {
 	struct device *dev;
 	void __iomem *regs;
 	u32 id;
+	struct mipi_dsi_host host;
+	struct mipi_dsi_device *panel_dsi;
 };
+
+static inline struct gs101_dsim *host_to_dsim(struct mipi_dsi_host *host)
+{
+	return container_of(host, struct gs101_dsim, host);
+}
 
 /*
  * A snapshot of the link as the bootloader left it. Logged once at bind
@@ -121,6 +144,111 @@ static void gs101_dsim_dump_state(struct gs101_dsim *dsim)
 		 status1 & LINK_STATUS1_CMD_MODE_STATUS ? "command" : "video");
 }
 
+static int gs101_dsim_host_attach(struct mipi_dsi_host *host,
+				  struct mipi_dsi_device *device)
+{
+	struct gs101_dsim *dsim = host_to_dsim(host);
+
+	if (dsim->panel_dsi)
+		return -EBUSY;
+
+	dsim->panel_dsi = device;
+
+	dev_info(dsim->dev, "DSIM%u: attached %s, %u lanes, flags %#lx\n",
+		 dsim->id, dev_name(&device->dev), device->lanes,
+		 device->mode_flags);
+
+	return 0;
+}
+
+static int gs101_dsim_host_detach(struct mipi_dsi_host *host,
+				  struct mipi_dsi_device *device)
+{
+	struct gs101_dsim *dsim = host_to_dsim(host);
+
+	if (dsim->panel_dsi == device)
+		dsim->panel_dsi = NULL;
+
+	return 0;
+}
+
+static int gs101_dsim_wait_pkthdr_room(struct gs101_dsim *dsim)
+{
+	u32 val;
+
+	return readl_poll_timeout(dsim->regs + DSIM_FIFOCTRL, val,
+				  !(val & FIFOCTRL_FULL_PH_SFR), 10, 20000);
+}
+
+static ssize_t gs101_dsim_host_transfer(struct mipi_dsi_host *host,
+					const struct mipi_dsi_msg *msg)
+{
+	struct gs101_dsim *dsim = host_to_dsim(host);
+	struct mipi_dsi_packet packet;
+	const u8 *tx;
+	u32 escmode;
+	u32 fifo;
+	size_t i;
+	u32 val;
+	int ret;
+
+	if (msg->rx_len || msg->rx_buf)
+		return -EOPNOTSUPP;
+
+	ret = mipi_dsi_create_packet(&packet, msg);
+	if (ret)
+		return ret;
+
+	escmode = readl(dsim->regs + DSIM_ESCMODE);
+	writel(escmode | ESCMODE_CMD_LPDT, dsim->regs + DSIM_ESCMODE);
+
+	writel(INTSRC_SFR_PH_FIFO_EMPTY | INTSRC_SFR_PL_FIFO_EMPTY |
+	       INTSRC_SFR_PH_FIFO_OVERFLOW, dsim->regs + DSIM_INTSRC);
+
+	tx = packet.payload;
+	for (i = 0; i < packet.payload_length; i += 4) {
+		size_t n = min_t(size_t, 4, packet.payload_length - i);
+		size_t j;
+
+		val = 0;
+		for (j = 0; j < n; j++)
+			val |= (u32)tx[i + j] << (8 * j);
+
+		ret = readl_poll_timeout(dsim->regs + DSIM_FIFOCTRL, fifo,
+					 !(fifo & FIFOCTRL_FULL_PL_SFR),
+					 10, 20000);
+		if (ret)
+			goto out;
+
+		writel(val, dsim->regs + DSIM_PAYLOAD);
+	}
+
+	ret = gs101_dsim_wait_pkthdr_room(dsim);
+	if (ret)
+		goto out;
+
+	writel(PKTHDR_ID(packet.header[0]) | PKTHDR_DATA0(packet.header[1]) |
+	       PKTHDR_DATA1(packet.header[2]), dsim->regs + DSIM_PKTHDR);
+
+	ret = readl_poll_timeout(dsim->regs + DSIM_INTSRC, val,
+				 val & INTSRC_SFR_PH_FIFO_EMPTY, 10, 20000);
+	if (ret)
+		dev_err(dsim->dev, "DSIM%u: packet header FIFO stuck, INTSRC %#010x\n",
+			dsim->id, readl(dsim->regs + DSIM_INTSRC));
+
+out:
+	escmode = readl(dsim->regs + DSIM_ESCMODE);
+	writel(escmode & ~ESCMODE_CMD_LPDT, dsim->regs + DSIM_ESCMODE);
+
+	return ret ? ret : msg->tx_len;
+}
+
+static const struct mipi_dsi_host_ops gs101_dsim_host_ops = {
+	.attach		= gs101_dsim_host_attach,
+	.detach		= gs101_dsim_host_detach,
+	.transfer	= gs101_dsim_host_transfer,
+};
+
 static int gs101_dsim_bind(struct device *dev, struct device *master,
 			   void *data)
 {
@@ -137,12 +265,6 @@ static int gs101_dsim_bind(struct device *dev, struct device *master,
 	 */
 	gs101_dsim_dump_state(dsim);
 
-	/*
-	 * TODO: register the DSI host (mipi_dsi_host_register), attach the
-	 * panel, and replace the fixed connector in gs101_drm_drv.c with a
-	 * real one built from the panel's mode list. Nothing to bind until
-	 * then.
-	 */
 	return 0;
 }
 
@@ -175,6 +297,7 @@ static int gs101_dsim_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct gs101_dsim *dsim;
+	int ret;
 
 	dsim = devm_kzalloc(dev, sizeof(*dsim), GFP_KERNEL);
 	if (!dsim)
@@ -191,12 +314,37 @@ static int gs101_dsim_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(dsim->regs),
 				     "failed to map DSI registers\n");
 
-	return component_add(dev, &gs101_dsim_component_ops);
+	/*
+	 * Registered here, not in bind: mipi_dsi_host_register() creates the
+	 * panel's DSI device, but the panel driver then probes asynchronously,
+	 * and gs101_drm_bind() needs the panel already registered with
+	 * drm_panel. Doing this from bind made the first bind find no panel,
+	 * defer, and come back to a host that was already registered.
+	 *
+	 * It touches no DSIM registers, and neither does the panel's probe --
+	 * only a transfer does, by which point DECON holds cmu_dpu enabled.
+	 */
+	dsim->host.dev = dev;
+	dsim->host.ops = &gs101_dsim_host_ops;
+
+	ret = mipi_dsi_host_register(&dsim->host);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to register DSI host\n");
+
+	ret = component_add(dev, &gs101_dsim_component_ops);
+	if (ret)
+		mipi_dsi_host_unregister(&dsim->host);
+
+	return ret;
 }
 
 static void gs101_dsim_remove(struct platform_device *pdev)
 {
+	struct gs101_dsim *dsim = platform_get_drvdata(pdev);
+
 	component_del(&pdev->dev, &gs101_dsim_component_ops);
+	mipi_dsi_host_unregister(&dsim->host);
 }
 
 static const struct of_device_id gs101_dsim_of_match[] = {

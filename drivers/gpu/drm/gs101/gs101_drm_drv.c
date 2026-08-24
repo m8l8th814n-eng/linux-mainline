@@ -21,9 +21,11 @@
 #include <linux/platform_device.h>
 
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_bridge.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_encoder.h>
+#include <drm/drm_panel.h>
 #include <drm/drm_fbdev_dma.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
@@ -129,14 +131,50 @@ static const struct drm_connector_funcs gs101_drm_connector_funcs = {
 };
 
 /*
- * A placeholder for DSIM. The panel is hardwired and always present, so the
- * encoder does nothing and the connector is permanently connected -- which is
- * exactly true today, and becomes a lie the moment DSIM can power the panel
- * down. Replace it then.
+ * The panel hangs off DSIM as a child node rather than an OF graph endpoint,
+ * so drm_of_find_panel_or_bridge() does not apply -- walk the children and ask
+ * of_drm_find_panel() about each. -EPROBE_DEFER is propagated: the panel is
+ * registered from DSIM's bind via mipi_dsi_host_register(), which
+ * component_bind_all() has already run by the time this is called, but a
+ * deferred panel probe must still be waited out rather than silently ignored.
+ */
+static struct drm_panel *gs101_drm_find_panel(void)
+{
+	struct device_node *dsi_np, *panel_np;
+	struct drm_panel *panel = ERR_PTR(-ENODEV);
+
+	dsi_np = of_find_compatible_node(NULL, NULL, "google,gs101-dsim");
+	if (!dsi_np)
+		return ERR_PTR(-ENODEV);
+
+	for_each_available_child_of_node(dsi_np, panel_np) {
+		panel = of_drm_find_panel(panel_np);
+		if (!IS_ERR(panel) || PTR_ERR(panel) == -EPROBE_DEFER) {
+			of_node_put(panel_np);
+			break;
+		}
+	}
+
+	of_node_put(dsi_np);
+
+	return panel;
+}
+
+/*
+ * With a panel, the bridge owns the connector and the mode list comes from the
+ * panel -- and, more to the point, drm_panel_enable() reaches the panel, which
+ * is what puts TE back.
+ *
+ * Without one, fall back to the placeholder: an encoder that does nothing and a
+ * permanently connected fixed-mode connector. That is what the display ran on
+ * before the panel driver existed, and keeping it means a missing or deferred
+ * panel degrades to the old behaviour instead of losing the display outright.
  */
 static int gs101_drm_attach_panel(struct gs101_drm *priv)
 {
 	struct drm_device *drm = &priv->drm;
+	struct drm_bridge *bridge;
+	struct drm_panel *panel;
 	struct drm_crtc *crtc;
 	int ret;
 
@@ -158,6 +196,27 @@ static int gs101_drm_attach_panel(struct gs101_drm *priv)
 		drm_err(drm, "no CRTC for the encoder to drive\n");
 		return -ENODEV;
 	}
+
+	panel = gs101_drm_find_panel();
+	if (PTR_ERR(panel) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
+	if (!IS_ERR(panel)) {
+		bridge = devm_drm_panel_bridge_add_typed(drm->dev, panel,
+							 DRM_MODE_CONNECTOR_DSI);
+		if (IS_ERR(bridge))
+			return PTR_ERR(bridge);
+
+		ret = drm_bridge_attach(&priv->encoder, bridge, NULL, 0);
+		if (ret)
+			return ret;
+
+		drm_info(drm, "panel attached through bridge\n");
+
+		return 0;
+	}
+
+	drm_info(drm, "no panel (%pe), using the fixed connector\n", panel);
 
 	ret = drmm_connector_init(drm, &priv->connector,
 				  &gs101_drm_connector_funcs,

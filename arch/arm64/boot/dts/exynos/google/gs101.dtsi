@@ -2144,6 +2144,25 @@
 			reg-names = "dsi";
 
 			dsim,id = <0>;
+
+			/*
+			 * TE reaches DECON's hardware trigger over gpp0-3 in
+			 * EINT function. DECON selects that source with
+			 * HW_TRIG_SEL_FROM_DDI0, which is the reset value, so
+			 * only the pin mux has to be asserted here. The vendor
+			 * sets the same pin from the DSIM node
+			 * (gs101-drm-dpu.dtsi:194, te_from = <0>).
+			 */
+			pinctrl-names = "default";
+			pinctrl-0 = <&disp_te_pri_on>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			panel@0 {
+				compatible = "samsung,s6e3fc3";
+				reg = <0>;
+			};
 		};
 
 		/*

@@ -1078,7 +1078,7 @@ static const struct panfrost_compatible default_data = {
 	.pm_domain_names = NULL,
 };
 
-static const char * const gs101_supplies[] = { "mali", "buck8s", "ldo1s", "buck7m" };
+static const char * const gs101_supplies[] = { "mali", "buck8s", "ldo1s", "buck7m", NULL };
 static const struct panfrost_compatible gs101_data = {
 	.num_supplies = ARRAY_SIZE(gs101_supplies) - 1,
 	.supply_names = gs101_supplies,

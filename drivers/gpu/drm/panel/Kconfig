@@ -941,6 +941,17 @@ config DRM_PANEL_SAMSUNG_S6E3FC2X01
 
 	    Samsung AMS641RW (found in the OnePlus 6T smartphone)
 
+config DRM_PANEL_SAMSUNG_S6E3FC3
+	tristate "Samsung S6E3FC3 DSI command mode panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	help
+	  Say Y or M here to enable support for the Samsung s6e3fc3
+	  1080x2400 command mode panel, as fitted to the Google Pixel 6.
+
+	  The driver relies on the bootloader having brought the panel up
+	  and only asserts TE, which DECON's hardware trigger needs.
+
 config DRM_PANEL_SAMSUNG_S6E3HA2
 	tristate "Samsung S6E3HA2 DSI video mode panel"
 	depends on OF

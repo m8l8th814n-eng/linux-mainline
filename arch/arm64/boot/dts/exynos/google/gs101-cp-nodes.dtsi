@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * The cpif, cp_shmem and cpboot_spi nodes. Needs gs101-cp-rmem.dtsi first --
+ * cp_shmem references the regions defined there.
+ */
+
+#include <dt-bindings/soc/google/exynos-cpif.h>
+#include <dt-bindings/soc/samsung,exynos-usi.h>
+
+/ {
+	cpif {
+		compatible = "samsung,exynos-cp";
+		status = "okay";
+
+		/*
+		 * Board level, from the vendor's gs101/gs101-whitefin-cp-s5200-sit-common.dtsi
+		 * and gs101-whitefin2-cp-s5200-sit.dtsi, which are what gs101-raviole.dtsi
+		 * includes for oriole. slider2 is a different board: it puts CP2AP_ACTIVE on
+		 * gph1-2 and sets mif,cp2ap_active_not_alive, neither of which applies here.
+		 * s5100_init_modemctl_device() drives AP2CP_NRESET at probe, so these
+		 * have to be here or the driver works on an empty gpio array.
+		 *
+		 * The pinctrl states that go with them are left out: the vendor hangs
+		 * them off pinctrl_0, _1 and _6, and this tree names its pinctrl blocks
+		 * after the domain instead. The bootloader has already muxed the pins.
+		 */
+		gpio_ap2cp_wake_up = <&gph0 2 0x1>;
+		gpio_ap2cp_dump_noti = <&gph0 3 0x1>;
+		gpio_ap2cp_cp_pwr_on = <&gph1 0 0x1>;
+		gpio_ap2cp_pda_active = <&gph1 1 0x1>;
+		gpio_ap2cp_nreset_n = <&gph1 3 0x1>;
+
+		gpio_cp2ap_phone_active = <&gpa8 5 0x1>;
+		gpio_cp2ap_wake_up = <&gpa8 4 0x1>;
+		gpio_cp2ap_cp_ps_hold = <&gpa9 5 0x1>;
+
+		pci_ch_num = <0>;
+		pci_db_addr = <0x40060000>;
+		cpboot_spi_bus_num = <9>;
+
+
+		/* */
+		mif,name = "s5123";
+		mif,cp_num = <0>;
+		mif,modem_type = <SEC_S5100>;
+		mif,protocol = <PROTOCOL_SIT>;
+		mif,ipc_version = <SIPC_VER_50>;
+		mif,link_type = <LINKDEV_PCIE>;
+		mif,link_name = "PCIE";
+		mif,link_attrs = <(
+			LINK_ATTR_XMIT_BTDLR_SPI |
+			LINK_ATTR_XMIT_BTDLR |
+			LINK_ATTR_DUMP_ALIGNED |
+			LINK_ATTR_BOOT_ALIGNED |
+			LINK_ATTR_MEM_DUMP |
+			LINK_ATTR_MEM_BOOT |
+			LINK_ATTR_DPRAM_MAGIC)>;
+		mif,interrupt_types = <INTERRUPT_GPIO>;
+		mif,capability_check = <1>;
+
+		/* Mailbox interrupt number from AP to CP */
+		mif,int_ap2cp_msg = <0>;
+		mif,int_ap2cp_wakeup = <1>;
+		mif,int_ap2cp_status = <2>;
+		mif,int_ap2cp_active = <3>;
+		mif,int_ap2cp_lcd_status = <4>;
+		mif,int_ap2cp_pcie_link_ack = <14>;
+		mif,int_ap2cp_uart_noti = <15>;
+
+		/* Mailbox interrupt number from CP to AP */
+		mif,irq_cp2ap_msg = <0>;
+		mif,irq_cp2ap_status = <2>;
+		mif,irq_cp2ap_active = <3>;
+		mif,irq_cp2ap_wakelock = <8>;
+		mif,irq_cp2ap_ratmode = <9>;
+
+		/* Legacy Buffers (FMT, RAW) */
+		legacy_fmt_head_tail_offset = <0x8>;
+		legacy_fmt_buffer_offset = <0x1000>;
+		legacy_fmt_txq_size = <0x1000>;
+		legacy_fmt_rxq_size = <0x1000>;
+		legacy_raw_head_tail_offset = <0x18>;
+		legacy_raw_buffer_offset = <0x3000>;
+		legacy_raw_txq_size = <0x1FD000>;
+		legacy_raw_rxq_size = <0x200000>;
+		legacy_raw_rx_buffer_cached = <0>;
+
+		offset_srinfo_offset = <0x64>;
+		offset_capability_offset = <0x70>;
+
+		offset_boot_indicator = <0x90>;
+
+		srinfo_offset = <0x300>;
+		srinfo_size = <0x400>;
+		capability_offset = <0xA0>;
+
+		/* capability value */
+		ap_capability_0 = <0x0>;
+		ap_capability_1 = <0x0>;
+
+		/*
+		 * Control messages containing two elements
+		 * <MAILBOX_SR [shared register number]>
+		 * <DRAM_V1   [offset from ipc base]>
+		 * <DRAM_V2   [offset from cmsg offset]>
+		 */
+		ap2cp_msg = <DRAM_V1 2048>;
+		cp2ap_msg = <DRAM_V1 2052>;
+		ap2cp_united_status = <DRAM_V1 2056>;
+		cp2ap_united_status = <DRAM_V1 2060>;
+		ap2cp_kerneltime = <DRAM_V1 2084>;
+		ap2cp_handover_block_info = <DRAM_V1 2092>;
+
+		/* Status bit info
+		 * for mbx_ap2cp_united_status
+		 */
+		sbi_lcd_status_mask = <0x1>;
+		sbi_lcd_status_pos = <27>;
+		sbi_crash_type_mask = <0xf>;
+		sbi_crash_type_pos = <23>;
+		sbi_uart_noti_mask = <0x1>;
+		sbi_uart_noti_pos = <16>;
+		sbi_ds_det_mask = <0x3>;
+		sbi_ds_det_pos = <14>;
+		sbi_pda_active_mask = <0x1>;
+		sbi_pda_active_pos = <5>;
+		sbi_ap_status_mask = <0xf>;
+		sbi_ap_status_pos = <1>;
+
+		/* Status bit info
+		 * for mbx_cp2ap_united_status
+		 */
+		sbi_cp_rat_mode_mask = <0x3f>;
+		sbi_cp_rat_mode_pos = <26>;
+		sbi_cp2ap_wakelock_mask = <0x1>;
+		sbi_cp2ap_wakelock_pos = <6>;
+		sbi_lte_active_mask = <0x1>;
+		sbi_lte_active_pos = <5>;
+		sbi_cp_status_mask = <0xf>;
+		sbi_cp_status_pos = <1>;
+
+		/* Status bit info for mbx_ap2cp_kerneltime */
+		sbi_ap2cp_kerneltime_sec_mask = <0xfff>;
+		sbi_ap2cp_kerneltime_sec_pos = <20>;
+		sbi_ap2cp_kerneltime_usec_mask = <0xfffff>;
+		sbi_ap2cp_kerneltime_usec_pos = <0>;
+
+		/* Packet processor */
+		pktproc_use_36bit_addr = <0>;
+		pktproc_cp_base = <0x0 0x20000000>;
+
+		pktproc_dl_support = <1>;
+		pktproc_dl_version = <2>;
+
+		pktproc_dl_info_rgn_offset = <0x00000000>;
+		pktproc_dl_info_rgn_size = <0x00001000>;
+		pktproc_dl_desc_rgn_offset = <0x00001000>;
+		pktproc_dl_desc_rgn_size = <0x000FF000>;
+		pktproc_dl_buff_rgn_offset = <0x00100000>;
+		pktproc_dl_buff_rgn_size = <0x01B00000>;
+		/* Size of data region is defined
+		 * by reserved mem size
+		 */
+
+		pktproc_dl_info_rgn_cached = <0>;
+		pktproc_dl_desc_rgn_cached = <0>;
+		pktproc_dl_buff_rgn_cached = <1>;
+
+		/* 0:ringbuf mode, 1:sktbuf mode */
+		pktproc_dl_desc_mode = <1>;
+		pktproc_dl_num_queue = <1>;
+		pktproc_dl_use_exclusive_irq = <0>;
+		/*
+		 * H/W IO cache coherency. The vendor sets this and builds with
+		 * CONFIG_LINK_DEVICE_PCIE_IOCC, which compiles out the
+		 * dma_sync_single_for_*() calls in the pktproc paths. pcie0 here
+		 * carries no dma-coherent property, so the kernel maps the
+		 * modem's DMA as non-coherent and those syncs are the only thing
+		 * keeping the buffers valid. Zero keeps them, and pktproc_get_dt()
+		 * only requires that this and the config agree.
+		 */
+		pktproc_dl_use_hw_iocc = <0>;
+		pktproc_dl_max_packet_size = <2048>;
+		pktproc_dl_use_dedicated_baaw = <0>;
+
+		/* Packet processor for UL */
+		pktproc_ul_support = <1>;
+		pktproc_ul_info_rgn_offset = <0x06000000>;
+		pktproc_ul_info_rgn_size = <0x00001000>;
+		pktproc_ul_desc_rgn_offset = <0x06001000>;
+		pktproc_ul_desc_rgn_size = <0x00020000>;
+		pktproc_ul_buff_rgn_offset = <0x06021000>;
+		pktproc_ul_buff_rgn_size = <0x003DF000>;
+		pktproc_ul_padding_required = <1>; /* for s5123 EVT1 only */
+		pktproc_ul_num_queue = <2>;
+		pktproc_ul_max_packet_size = <2048>;
+		pktproc_ul_info_rgn_cached = <0>;
+		pktproc_ul_desc_rgn_cached = <0>;
+		pktproc_ul_buff_rgn_cached = <0>;
+		pktproc_ul_use_hw_iocc = <0>; /* see pktproc_dl_use_hw_iocc */
+
+		/* TPMON: CP throughput monitor */
+
+		/* IO devices */
+		iodevs {
+			io_device_0 {
+				iod,name = "umts_ipc";
+				iod,ch = <EXYNOS_CH_ID_FMT_0>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(IO_ATTR_MULTI_CH)>;
+				iod,ch_count = <2>;
+			};
+			io_device_1 {
+				iod,name = "umts_rfs0";
+				iod,ch = <EXYNOS_CH_ID_RFS_0>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_2 {
+				iod,name = "umts_router";
+				iod,ch = <EXYNOS_CH_ID_BT_DUN>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_3 {
+				iod,name = "umts_dm0";
+				iod,ch = <EXYNOS_CH_ID_CPLOG>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(IO_ATTR_STATE_RESET_NOTI)>;
+			};
+			io_device_4 {
+				iod,name = "umts_loopback";
+				iod,ch = <EXYNOS_CH_ID_LOOPBACK>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_5 {
+				iod,name = "rmnet";
+				iod,ch = <EXYNOS_CH_EX_ID_PDP_0>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_NET>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(IO_ATTR_MULTI_CH)>;
+				iod,ch_count = <30>;
+			};
+			io_device_6 {
+				iod,name = "dummy";
+				iod,ch = <EXYNOS_CH_EX_ID_PDP_30>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_NET>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_7 {
+				iod,name = "multipdp";
+				iod,ch = <EXYNOS_CH_ID_MULTIPDP>;
+				iod,format = <IPC_MULTI_RAW>;
+				iod,io_type = <IODEV_DUMMY>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_8 {
+				iod,name = "umts_boot0";
+				iod,ch = <EXYNOS_CH_ID_BOOT>;
+				iod,format = <IPC_BOOT>;
+				iod,io_type = <IODEV_BOOTDUMP>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(IO_ATTR_NO_CHECK_MAXQ)>;
+			};
+			io_device_9 {
+				iod,name = "umts_rcs0";
+				iod,ch = <EXYNOS_CH_ID_RCS_0>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_10 {
+				iod,name = "umts_rcs1";
+				iod,ch = <EXYNOS_CH_ID_RCS_1>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_11 {
+				iod,name = "umts_wfc0";
+				iod,ch = <EXYNOS_CH_ID_WFS_0>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_12 {
+				iod,name = "umts_wfc1";
+				iod,ch = <EXYNOS_CH_ID_WFS_1>;
+				iod,format = <IPC_RAW>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_13 {
+				iod,name = "oem_ipc0";
+				iod,ch = <129>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_14 {
+				iod,name = "oem_ipc1";
+				iod,ch = <130>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_15 {
+				iod,name = "oem_ipc2";
+				iod,ch = <131>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_16 {
+				iod,name = "oem_ipc3";
+				iod,ch = <132>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_17 {
+				iod,name = "oem_ipc4";
+				iod,ch = <133>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_18 {
+				iod,name = "oem_ipc5";
+				iod,ch = <134>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_19 {
+				iod,name = "oem_ipc6";
+				iod,ch = <135>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+			io_device_20 {
+				iod,name = "oem_ipc7";
+				iod,ch = <136>;
+				iod,format = <IPC_FMT>;
+				iod,io_type = <IODEV_IPC>;
+				iod,link_type = <LINKDEV_PCIE>;
+				iod,attrs = <(0x0)>;
+			};
+		};
+	};
+
+	cp_shmem {
+		compatible = "samsung,exynos-cp-shmem";
+
+		memory-region = <&cp_rmem>, <&cp_msi_rmem>, <&cp_rmem_1>, <&cp_rmem_2>;
+
+		cp_num = <0>;
+		use_mem_map_on_cp = <0>;
+
+		regions {
+			ipc {
+				region,name = "IPC";
+				region,index = <SHMEM_IPC>;
+				region,rmem = <0>;
+				region,offset = <0x00000000>;
+				region,size = <0x00400000>;
+				region,cached = <1>;
+			};
+			msi {
+				region,name = "MSI";
+				region,index = <SHMEM_MSI>;
+				region,rmem = <1>;
+				region,offset = <0x00000000>;
+				region,size = <0x00001000>;
+				region,cached = <0>;
+			};
+			pktproc {
+				region,name = "PKTPROC";
+				region,index = <SHMEM_PKTPROC>;
+				region,rmem = <2>;
+				region,offset = <0x00000000>;
+				region,size = <0x01C00000>;
+				/* Cached info is defined by pktproc itself */
+			};
+			pktproc_ul {
+				region,name = "PKTPROC_UL";
+				region,index = <SHMEM_PKTPROC_UL>;
+				region,rmem = <3>;
+				region,offset = <0x00000000>;
+				region,size = <0x00400000>;
+				/* Cached info is defined by pktproc_ul itself */
+			};
+		};
+	};
+};

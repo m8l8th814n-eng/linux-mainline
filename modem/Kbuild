@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Samsung Exynos CP interface (cpif) for the s5123 modem in gs101.
+#
+# Trimmed against the vendor Kbuild: DIT, BTL, the throughput monitor,
+# direct DM and the vendor hooks are all left out. None of them are needed
+# to bring the link up, and each drags in more of the vendor SoC layer.
+#
+# The vendor selects these through Kconfig symbols that do not exist here,
+# so the file lists are fixed instead.
+
+ccflags-y += -Wformat -Wformat-zero-length
+ccflags-y += -DCPIF_WAKEPKT_SET_MARK=0x80000000
+ccflags-y += -DCONFIG_OPTION_REGION=\"EUR\"
+ccflags-y += -I$(srctree)/vendor-stub-include
+ccflags-y += -I$(src)
+
+# The CONFIG_* on the make command line reach Kbuild but not the
+# preprocessor -- only .config symbols become macros through autoconf.h.
+# The vendor headers gate declarations and whole structs on IS_ENABLED(),
+# so without these the stubs win and every real definition collides.
+ccflags-y += -DCONFIG_EXYNOS_MODEM_IF=1
+# The mailbox is for shared-memory links. s5100 hangs off PCIe and takes its
+# interrupts over MSI and GPIO, which is why both this DT and the vendor's set
+# mif,interrupt_types = INTERRUPT_GPIO -- and register_irq_handler() rejects
+# anything that is not INTERRUPT_MAILBOX with -EPERM. mcu_ipc.h supplies
+# no-op stubs for the cp_mbox_* calls when this is unset.
+ccflags-y += -DCONFIG_SHM_IPC=1
+ccflags-y += -DCONFIG_BOOT_DEVICE_SPI=1
+ccflags-y += -DCONFIG_SEC_MODEM_S5100=1
+ccflags-y += -DCONFIG_LINK_DEVICE_PCIE=1
+ccflags-y += -DCONFIG_LINK_DEVICE_WITH_SBD_ARCH=1
+ccflags-y += -DCONFIG_CP_PKTPROC=1
+ccflags-y += -DCONFIG_CP_PKTPROC_UL=1
+
+# cp_gpio_type puts CP_WRST_N, CP2AP_CP_WRST_N and PM_WRST_N behind
+# !CP_WRESET_WA, and s5100_get_pdata() requires every entry up to CP_GPIO_MAX
+# to resolve. whitefin defines eight GPIOs and no WRST_N at all, which is
+# CP_GPIO_MAX with this set -- so this is how Google builds the board. It also
+# settles the VoLTE inconsistency: the block reading mc->pcie_voice_call_on is
+# gated on !CP_WRESET_WA while the member only exists when it is set.
+ccflags-y += -DCONFIG_CP_WRESET_WA=1
+ccflags-y += -DCONFIG_CPIF_AP_SUSPEND_DURING_VOICE_CALL=1
+
+obj-$(CONFIG_MCU_IPC)		+= mcu_ipc.o
+obj-$(CONFIG_SHM_IPC)		+= shm_ipc.o
+obj-$(CONFIG_BOOT_DEVICE_SPI)	+= boot_device_spi.o
+
+obj-$(CONFIG_EXYNOS_MODEM_IF)	+= cpif.o
+
+cpif-y	:= modem_main.o modem_variation.o
+cpif-y	+= modem_io_device.o net_io_device.o bootdump_io_device.o
+cpif-y	+= ipc_io_device.o modem_toe_device.o
+cpif-y	+= modem_utils.o modem_dump.o
+cpif-y	+= link_device.o
+cpif-y	+= link_device_memory_flow_control.o link_device_memory_debug.o
+cpif-y	+= link_device_memory_snapshot.o link_device_memory_legacy.o
+cpif-y	+= link_device_memory_sbd.o
+cpif-y	+= s51xx_pcie.o
+cpif-y	+= modem_ctrl_s5100.o modem_ctrl.o
+cpif-y	+= link_rx_pktproc.o link_tx_pktproc.o
+cpif-y	+= cpif_qos_info.o

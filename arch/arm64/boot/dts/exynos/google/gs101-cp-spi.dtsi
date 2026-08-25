@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * USI9 in SPI mode plus the cpboot_spi child. Split out because this is the
+ * only part of the CP device tree that makes a driver touch registers.
+ */
+
+#include <dt-bindings/soc/samsung,exynos-usi.h>
+
+/*
+ * spi_9 and hsi2c_9 and a uart all sit at 0x10d20000 -- they are alternate
+ * functions of one USI block, and the wrapper picks which. Enabling the SPI
+ * child on its own leaves the mux and the clocks unset, and the SPI driver
+ * then talks to registers that are not a SPI controller.
+ */
+/*
+ * cpboot_spi_bus_num is 9 and boot_device_spi matches on spi->controller->
+ * bus_num, but without an alias the SPI core hands out numbers in probe order
+ * -- 10d40000.spi and 10d60000.spi already take 0 and 1, so this controller
+ * would come up as 2. The vendor aliases it in gs101-usi.dtsi.
+ */
+/ {
+	aliases {
+		spi9 = &spi_9;
+	};
+};
+
+&usi9 {
+	samsung,mode = <USI_MODE_SPI>;
+	status = "okay";
+};
+
+&spi9_cs_func {
+	samsung,pin-con-pdn = <GS101_PIN_PDN_PREV>;
+	samsung,pin-pud-pdn = <GS101_PIN_PULL_NONE>;
+};
+
+&spi_9 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi9_bus &spi9_cs_func>;
+	cpboot_spi@0 {
+		compatible = "samsung,exynos-cp-spi";
+		reg = <0x0>;
+		spi-max-frequency = <2150000>;
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+			samsung,spi-chip-select-mode = <1>;
+		};
+	};
+};

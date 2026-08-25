@@ -1758,6 +1758,7 @@
 
 		pcie0: pcie@11920000 {
 			compatible = "google,gs101-pcie";
+			linux,pci-domain = <0>;
 			reg = <0x11920000 0x2000>,
 			      <0x11c00000 0x301000>,
 			      <0x40ffe000 0x2000>;
@@ -1811,6 +1812,7 @@
 
 		pcie1: pcie@14520000 {
 			compatible = "google,gs101-pcie";
+			linux,pci-domain = <1>;
 			reg = <0x14520000 0x2000>,
 			      <0x14800000 0x301000>,
 			      <0x60ffe000 0x2000>;
@@ -2232,7 +2234,7 @@
 
 		cmu_top: clock-controller@1e080000 {
 			compatible = "google,gs101-cmu-top";
-			reg = <0x1e080000 0x8000>;
+			reg = <0x1e080000 0x10000>;
 			#clock-cells = <1>;
 
 			clocks = <&ext_24_5m>;

@@ -15,6 +15,9 @@
 #include "gs101-pinctrl.h"
 #include "gs101.dtsi"
 #include "gs101-audio.dtsi"
+#include "gs101-cp-rmem.dtsi"
+#include "gs101-cp-nodes.dtsi"
+#include "gs101-cp-spi.dtsi"
 
 / {
 	aliases {
@@ -589,14 +592,14 @@
 
 			/* ldo3s & ldo5s are unused, ldo4s is board specific */
 
-			ldo6s {
+			s2mpg11_ldo6s: ldo6s {
 				/* sensors */
 				regulator-name = "vdd_prox";
 				regulator-min-microvolt = <2500000>;
 				regulator-max-microvolt = <3300000>;
 			};
 
-			ldo7s {
+			s2mpg11_ldo7s: ldo7s {
 				/* sensors */
 				regulator-name = "vdd_sensors";
 				regulator-min-microvolt = <1600000>;
@@ -1198,4 +1201,15 @@
 			};
 		};
 	};
+};
+
+/*
+ * AoC drives the sensor rails. Without the list it logs "unsupported sensor
+ * power list" and leaves them alone; the vendor names the same two LDOs in
+ * gs101-common.dtsi.
+ */
+&aoc {
+	sensor_1v8-supply = <&s2mpg11_ldo7s>;
+	sensor_3v3-supply = <&s2mpg11_ldo6s>;
+	sensor_power_list = "sensor_1v8", "sensor_3v3";
 };

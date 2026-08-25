@@ -22,6 +22,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_pci.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -64,9 +65,34 @@ struct gs101_pcie {
 	int			num_clks;
 	struct gpio_desc	*perst;
 	u32			num_lanes;
+	int			ch_num;
 };
 
 #define to_gs101_pcie(x)	dev_get_drvdata((x)->dev)
+
+/*
+ * The Samsung CP interface driver addresses root complexes by channel number
+ * rather than by device, so keep a small registry keyed on the PCI domain from
+ * "linux,pci-domain". Channel 0 is HSI1 and carries the modem, channel 1 is
+ * HSI2 and carries WLAN.
+ */
+#define GS101_PCIE_MAX_CH	2
+static struct gs101_pcie *gs101_pcie_ch[GS101_PCIE_MAX_CH];
+
+/*
+ * Opaque here on purpose: cpif passes a pointer to one of these and nothing
+ * in this driver looks inside it. Including the vendor header would drag in
+ * vendor-stub-include, which is only on the out-of-tree modules' search path.
+ */
+struct exynos_pcie_register_event;
+
+static struct gs101_pcie *gs101_pcie_get_ch(int ch_num)
+{
+	if (ch_num < 0 || ch_num >= GS101_PCIE_MAX_CH)
+		return NULL;
+
+	return gs101_pcie_ch[ch_num];
+}
 
 static u32 gs101_elbi_read(struct gs101_pcie *pcie, u32 reg)
 {
@@ -278,6 +304,10 @@ static int gs101_pcie_probe(struct platform_device *pdev)
 	if (of_property_read_u32(dev->of_node, "num-lanes", &pcie->num_lanes))
 		pcie->num_lanes = 2;
 
+	pcie->ch_num = of_get_pci_domain_nr(dev->of_node);
+	if (pcie->ch_num >= GS101_PCIE_MAX_CH)
+		pcie->ch_num = -1;
+
 	/*
 	 * gs101 has a single multiplexed PCIe interrupt (the DT names it "msi").
 	 * Take it over ourselves: tell the DWC core not to install its dedicated
@@ -299,8 +329,179 @@ static int gs101_pcie_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request PCIe IRQ\n");
 
+	if (pcie->ch_num >= 0)
+		gs101_pcie_ch[pcie->ch_num] = pcie;
+
 	return 0;
 }
+
+/*
+ * Interface expected by the Samsung CP interface driver (cpif). The vendor
+ * implements these in its own DesignWare fork; only the two that carry real
+ * behaviour are implemented here.
+ *
+ * PERST# is what releases the modem from reset, and is the whole reason the
+ * endpoint ever appears on the bus. The gpiod is active-low in the device
+ * tree, so a logical 1 holds the endpoint in reset.
+ *
+ * The rest exist so cpif links and runs. Its L1 substate control, its
+ * link-event callbacks and its register dumps are all recovery and debug
+ * paths -- not required to bring the link up, and every one of them would
+ * need the vendor's own error handling to mean anything.
+ */
+void exynos_pcie_set_perst_gpio(int ch_num, bool on)
+{
+	struct gs101_pcie *pcie = gs101_pcie_get_ch(ch_num);
+
+	if (!pcie)
+		return;
+
+	gpiod_set_value_cansleep(pcie->perst, on ? 0 : 1);
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_set_perst_gpio);
+
+int exynos_pcie_rc_chk_link_status(int ch_num)
+{
+	struct gs101_pcie *pcie = gs101_pcie_get_ch(ch_num);
+
+	if (!pcie)
+		return -ENODEV;
+
+	return gs101_pcie_link_up(&pcie->pci) ? 1 : 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_chk_link_status);
+
+int exynos_pcie_rc_l1ss_ctrl(int enable, int id, int ch_num)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_l1ss_ctrl);
+
+int exynos_pcie_register_event(struct exynos_pcie_register_event *reg)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_register_event);
+
+void exynos_pcie_rc_register_dump(int ch_num)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_register_dump);
+
+void exynos_pcie_rc_dump_all_status(int ch_num)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_dump_all_status);
+
+bool exynos_pcie_rc_get_cpl_timeout_state(int ch_num)
+{
+	return false;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_get_cpl_timeout_state);
+
+bool exynos_pcie_rc_get_sudden_linkdown_state(int ch_num)
+{
+	return false;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_get_sudden_linkdown_state);
+
+void exynos_pcie_rc_force_linkdown_work(int ch_num)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_force_linkdown_work);
+
+void exynos_pcie_set_ready_cto_recovery(int ch_num)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_set_ready_cto_recovery);
+
+/*
+ * The vendor defers link training until its consumer asks for it, so cpif
+ * calls poweron() after taking the modem out of reset and expects the
+ * endpoint to appear. This driver instead trains the link in probe, from
+ * dw_pcie_host_init(), long before the modem is up -- so the bus was scanned
+ * while the endpoint was still held in reset and found nothing.
+ *
+ * Reporting success without rescanning would leave cpif waiting for a device
+ * that is now on the bus but was never enumerated.
+ */
+int exynos_pcie_poweron(int ch_num, int spd, int width)
+{
+	struct gs101_pcie *pcie = gs101_pcie_get_ch(ch_num);
+	struct dw_pcie_rp *pp;
+	int ret;
+
+	if (!pcie)
+		return -ENODEV;
+
+	pp = &pcie->pci.pp;
+	if (!pp->bridge || !pp->bridge->bus)
+		return -ENODEV;
+
+	if (!gs101_pcie_link_up(&pcie->pci)) {
+		ret = dw_pcie_start_link(&pcie->pci);
+		if (ret)
+			return ret;
+
+		ret = dw_pcie_wait_for_link(&pcie->pci);
+		if (ret)
+			return ret;
+	}
+
+	pci_lock_rescan_remove();
+	pci_rescan_bus(pp->bridge->bus);
+	pci_unlock_rescan_remove();
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_poweron);
+
+int exynos_pcie_poweroff(int ch_num)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_poweroff);
+
+/*
+ * Outbound ATU, MSI addressing and the separated MSI vectors are all set up
+ * by the DesignWare core here, from the ranges in the device tree. cpif only
+ * needs to configure them itself on the vendor stack, where that work is left
+ * to the consumer.
+ */
+int exynos_pcie_rc_set_outbound_atu(int ch_num, u32 target_addr, u32 offset,
+				    u32 size)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_set_outbound_atu);
+
+int exynos_pcie_set_msi_ctrl_addr(int num, u64 msi_ctrl_addr)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_set_msi_ctrl_addr);
+
+int register_separated_msi_vector(int ch_num, irq_handler_t handler,
+				  void *context, int *irq_num)
+{
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(register_separated_msi_vector);
+
+void exynos_pcie_rc_print_msi_register(int ch_num)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_print_msi_register);
+
+void exynos_pcie_rc_set_sudden_linkdown_state(int ch_num, bool recovery)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_set_sudden_linkdown_state);
+
+void exynos_pcie_rc_set_cpl_timeout_state(int ch_num, bool recovery)
+{
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_rc_set_cpl_timeout_state);
 
 static const struct of_device_id gs101_pcie_of_match[] = {
 	{ .compatible = "google,gs101-pcie" },

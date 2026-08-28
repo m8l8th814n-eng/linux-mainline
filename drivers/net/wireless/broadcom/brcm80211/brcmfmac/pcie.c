@@ -536,8 +536,23 @@ brcmf_pcie_tcm_addr(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
 
 	win = mem_offset & ~(devinfo->bar1_size - 1);
 	if (win != devinfo->cur_bar1_win) {
+		u32 readback;
+
 		pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_BAR1_WINDOW,
 				       win);
+		/* Config writes are posted, and the caller's MMIO read goes to
+		 * a different address space with no ordering against it. Read
+		 * the window back to flush the write, and rewrite it if it did
+		 * not stick -- brcmf_pcie_select_core() does the same for the
+		 * BAR0 window. Without this the access can land on the previous
+		 * window, outside the aperture, and return all-ones.
+		 */
+		if (!pci_read_config_dword(devinfo->pdev,
+					   BRCMF_PCIE_BAR1_WINDOW, &readback) &&
+		    readback != win)
+			pci_write_config_dword(devinfo->pdev,
+					       BRCMF_PCIE_BAR1_WINDOW, win);
+
 		devinfo->cur_bar1_win = win;
 	}
 	return devinfo->tcm + (mem_offset - win);
@@ -1547,8 +1562,10 @@ static int brcmf_pcie_preinit(struct device *dev)
 
 	brcmf_dbg(PCIE, "Enter\n");
 
+	/* Interrupts and the hostready doorbell are done in brcmf_pcie_setup(),
+	 * before the rings are fed.
+	 */
 	brcmf_pcie_intr_enable(buspub->devinfo);
-	brcmf_pcie_hostready(buspub->devinfo);
 
 	return 0;
 }
@@ -1874,10 +1891,24 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 	if (err)
 		return err;
 
+	/* Releasing the ARM resets cores on the backplane, and the BAR1 window
+	 * register goes with them. The cached window would then disagree with
+	 * the hardware and the next TCM access is skipped as already-correct,
+	 * landing outside the aperture and reading all-ones. Put both back to a
+	 * known state so the next access reprograms the window.
+	 */
+	devinfo->cur_bar1_win = 0;
+	pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_BAR1_WINDOW, 0);
+
 	brcmf_dbg(PCIE, "Wait for FW init\n");
 	sharedram_addr = sharedram_addr_written;
 	loop_counter = BRCMF_PCIE_FW_UP_TIMEOUT / 50;
-	while ((sharedram_addr == sharedram_addr_written) && (loop_counter)) {
+	/* Keep waiting on an all-ones read as well. It means the TCM access did
+	 * not land, not that firmware published an address, and treating it as
+	 * a value ends the wait early and fails the range check below.
+	 */
+	while ((sharedram_addr == sharedram_addr_written ||
+		sharedram_addr == 0xffffffff) && (loop_counter)) {
 		msleep(50);
 		sharedram_addr = brcmf_pcie_read_ram32(devinfo,
 						       devinfo->ci->ramsize -
@@ -2001,24 +2032,66 @@ static int brcmf_pcie_buscoreprep(void *ctx)
 }
 
 
+/* Broadcom drives FLR through its own config registers rather than the PCIe
+ * capability, and reports completion in a vendor status bit. pcie_flr() knows
+ * nothing about that bit, so it returns while the chip is still in reset and
+ * the SYSMEM core then reads back all-ones. Mirrors dhd_bus_perform_flr().
+ */
+#define BRCMF_PCIE_CFG_SUBSYSTEM_CONTROL	0x88
+#define  BRCMF_PCIE_SSRESET_STATUS		BIT(13)
+#define BRCMF_PCIE_CFG_DEVICE_CONTROL		0xb4
+#define  BRCMF_PCIE_FUNCTION_LEVEL_RESET	BIT(15)
+
+#define BRCMF_PCIE_FLR_DELAY_MS			70
+#define BRCMF_PCIE_SSRESET_RETRY_DELAY_US	40
+#define BRCMF_PCIE_SSRESET_RETRIES		200
+
 static int brcmf_pcie_flr_reset(struct brcmf_pciedev_info *devinfo)
 {
 	struct pci_dev *pdev = devinfo->pdev;
-	int err;
+	u32 val;
+	int i;
 
-	/* PCIe function level reset for a fully clean chip (see caller). */
-	pci_save_state(pdev);
-	err = pcie_flr(pdev);
+	/* A previous failed attach can leave the device in FLR. Asserting it
+	 * again from that state wedges the chip, so only run the assert half
+	 * when it is not already in reset.
+	 */
+	pci_read_config_dword(pdev, BRCMF_PCIE_CFG_SUBSYSTEM_CONTROL, &val);
+	if (!(val & BRCMF_PCIE_SSRESET_STATUS)) {
+		pci_save_state(pdev);
+
+		pci_read_config_dword(pdev, BRCMF_PCIE_CFG_DEVICE_CONTROL, &val);
+		val |= BRCMF_PCIE_FUNCTION_LEVEL_RESET;
+		pci_write_config_dword(pdev, BRCMF_PCIE_CFG_DEVICE_CONTROL, val);
+
+		msleep(BRCMF_PCIE_FLR_DELAY_MS);
+	}
+
+	pci_read_config_dword(pdev, BRCMF_PCIE_CFG_DEVICE_CONTROL, &val);
+	val &= ~BRCMF_PCIE_FUNCTION_LEVEL_RESET;
+	pci_write_config_dword(pdev, BRCMF_PCIE_CFG_DEVICE_CONTROL, val);
+
+	for (i = 0; i < BRCMF_PCIE_SSRESET_RETRIES; i++) {
+		pci_read_config_dword(pdev, BRCMF_PCIE_CFG_SUBSYSTEM_CONTROL,
+				      &val);
+		if (!(val & BRCMF_PCIE_SSRESET_STATUS))
+			break;
+		udelay(BRCMF_PCIE_SSRESET_RETRY_DELAY_US);
+	}
+
+	if (val & BRCMF_PCIE_SSRESET_STATUS) {
+		brcmf_err(NULL, "FLR did not complete, subsystem control 0x%08x\n",
+			  val);
+		return -ETIMEDOUT;
+	}
+
 	pci_restore_state(pdev);
-	if (err)
-		return err;
 
-	/* The chip re-runs its ROM bootloader after the reset and the BAR
-	 * window register is cleared, so drop the cached window (the next TCM
-	 * access reprograms it) and give the bootloader time to settle.
+	/* The BAR1 window register is cleared by the reset; drop the cached
+	 * value so the next TCM access reprograms it.
 	 */
 	devinfo->cur_bar1_win = 0;
-	msleep(100);
+
 	return 0;
 }
 
@@ -2389,6 +2462,17 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 	bus->msgbuf->max_flowrings = devinfo->shared.max_flowrings;
 
 	init_waitqueue_head(&devinfo->mbdata_resp_wait);
+
+	/* Signal that common ring init is complete before anything is posted
+	 * to those rings. brcmf_proto_attach() below fills the whole RXPOST
+	 * ring, and firmware that gates ring setup on this doorbell -- the
+	 * BCM4389 does -- has not initialised its read pointers until it
+	 * arrives. Entries written before that land in a ring the dongle is
+	 * not tracking, and it later walks into slots the host never wrote.
+	 * Mirrors dhd_prot_init() in the vendor driver.
+	 */
+	brcmf_pcie_intr_enable(devinfo);
+	brcmf_pcie_hostready(devinfo);
 
 	ret = brcmf_attach(&devinfo->pdev->dev);
 	if (ret)

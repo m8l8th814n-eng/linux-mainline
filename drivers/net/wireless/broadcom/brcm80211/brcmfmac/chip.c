@@ -692,6 +692,17 @@ static u32 brcmf_chip_sysmem_ramsize(struct brcmf_core_priv *sysmem)
 	}
 
 	/*
+	 * Give up rather than derive bank counts from all-ones, which yields
+	 * 31 RAM banks starting past 31 ROM banks and a nonsense size. The
+	 * vendor si_sysmem_size() bails out here too; the caller reports the
+	 * zero as "RAM size is incorrect".
+	 */
+	if (coreinfo == 0xffffffff) {
+		brcmf_err("SYSMEM coreinfo still reads all-ones after reset\n");
+		return 0;
+	}
+
+	/*
 	 * The SYSMEM core has its own bank-count fields, distinct from the
 	 * SOCRAM SRCI_SRNB_* layout, and the RAM banks follow the ROM banks
 	 * which must be skipped. Getting this wrong (e.g. reusing the SOCRAM

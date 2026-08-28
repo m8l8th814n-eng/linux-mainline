@@ -1524,6 +1524,37 @@ static void brcmf_msgbuf_debugfs_create(struct brcmf_pub *drvr)
 	brcmf_debugfs_add_entry(drvr, "msgbuf_stats", brcmf_msgbuf_stats_read);
 }
 
+/* Posting RX data buffers is deferred to here, which the core calls once
+ * brcmf_c_preinit_dcmds() has completed -- so the dongle has answered a
+ * command before it is handed a full RXPOST ring. Filling the ring during
+ * attach instead makes the first RXBUF_POST the very first message the
+ * firmware ever processes, and this one traps on it. The vendor driver posts
+ * these after its own init ioctls for the same reason (dhd_msgbuf.c:5443).
+ *
+ * Event and ioctl-response buffers stay in attach: the ioctls above cannot
+ * complete without somewhere to put their replies.
+ */
+static int brcmf_proto_msgbuf_init_done(struct brcmf_pub *drvr)
+{
+	struct brcmf_msgbuf *msgbuf = (struct brcmf_msgbuf *)drvr->proto->pd;
+	u32 count;
+
+	brcmf_dbg(MSGBUF, "Feeding rx data buffers, max %d\n",
+		  msgbuf->max_rxbufpost);
+
+	count = 0;
+	do {
+		brcmf_msgbuf_rxbuf_data_fill(msgbuf);
+		if (msgbuf->max_rxbufpost != msgbuf->rxbufpost)
+			msleep(10);
+		else
+			break;
+		count++;
+	} while (count < 10);
+
+	return 0;
+}
+
 int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 {
 	struct brcmf_bus_msgbuf *if_msgbuf;
@@ -1579,6 +1610,7 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 	drvr->proto->add_tdls_peer = brcmf_msgbuf_add_tdls_peer;
 	drvr->proto->rxreorder = brcmf_msgbuf_rxreorder;
 	drvr->proto->debugfs_create = brcmf_msgbuf_debugfs_create;
+	drvr->proto->init_done = brcmf_proto_msgbuf_init_done;
 	drvr->proto->pd = msgbuf;
 
 	init_waitqueue_head(&msgbuf->ioctl_resp_wait);
@@ -1614,18 +1646,8 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 		goto fail;
 
 
-	brcmf_dbg(MSGBUF, "Feeding buffers, rx data %d, rx event %d, rx ioctl resp %d\n",
-		  msgbuf->max_rxbufpost, msgbuf->max_eventbuf,
-		  msgbuf->max_ioctlrespbuf);
-	count = 0;
-	do {
-		brcmf_msgbuf_rxbuf_data_fill(msgbuf);
-		if (msgbuf->max_rxbufpost != msgbuf->rxbufpost)
-			msleep(10);
-		else
-			break;
-		count++;
-	} while (count < 10);
+	brcmf_dbg(MSGBUF, "Feeding buffers, rx event %d, rx ioctl resp %d\n",
+		  msgbuf->max_eventbuf, msgbuf->max_ioctlrespbuf);
 	brcmf_msgbuf_rxbuf_event_post(msgbuf);
 	brcmf_msgbuf_rxbuf_ioctlresp_post(msgbuf);
 

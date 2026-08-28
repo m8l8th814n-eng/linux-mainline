@@ -1858,7 +1858,8 @@ static void prepend_fw_builder_to_crash_string(struct aoc_prvdata *prvdata, char
 	char *fw_builder;
 	size_t prefix_size;
 
-	if (glob_match("*[0-9]-*[a-zA-Z]", prvdata->firmware_version)) {
+	if (prvdata->firmware_version &&
+	    glob_match("*[0-9]-*[a-zA-Z]", prvdata->firmware_version)) {
 		fw_builder = strchrnul(prvdata->firmware_version, '-');
 		fw_builder = strchrnul(fw_builder, '-');
 		fw_builder++;

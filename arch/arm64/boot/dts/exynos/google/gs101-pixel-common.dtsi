@@ -664,6 +664,12 @@
 	};
 };
 
+&aoc {
+	sensor_1v8-supply = <&s2mpg11_ldo7s>;
+	sensor_3v3-supply = <&s2mpg11_ldo6s>;
+	sensor_power_list = "sensor_1v8", "sensor_3v3";
+};
+
 &gpu {
      mali-supply = <&buck2s_reg>;
      buck8s-supply = <&buck8s_reg>;

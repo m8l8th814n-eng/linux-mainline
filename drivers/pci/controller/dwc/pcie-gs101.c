@@ -424,11 +424,18 @@ EXPORT_SYMBOL_GPL(exynos_pcie_set_ready_cto_recovery);
  *
  * Reporting success without rescanning would leave cpif waiting for a device
  * that is now on the bus but was never enumerated.
+ *
+ * The root port's downstream memory window is left disabled when the bus
+ * came up empty at boot, so a plain pci_rescan_bus() finds the endpoint and
+ * then fails every BAR with "no space". Size the bridge window between the
+ * scan and adding the devices, which is what pci_rescan_bus_bridge_resize()
+ * does for hotplug.
  */
 int exynos_pcie_poweron(int ch_num, int spd, int width)
 {
 	struct gs101_pcie *pcie = gs101_pcie_get_ch(ch_num);
 	struct dw_pcie_rp *pp;
+	struct pci_dev *rp;
 	int ret;
 
 	if (!pcie)
@@ -449,7 +456,15 @@ int exynos_pcie_poweron(int ch_num, int spd, int width)
 	}
 
 	pci_lock_rescan_remove();
-	pci_rescan_bus(pp->bridge->bus);
+	rp = pci_get_slot(pp->bridge->bus, PCI_DEVFN(0, 0));
+	if (rp && rp->subordinate) {
+		pci_scan_child_bus(rp->subordinate);
+		pci_assign_unassigned_bridge_resources(rp);
+		pci_bus_add_devices(rp->subordinate);
+	} else {
+		pci_rescan_bus(pp->bridge->bus);
+	}
+	pci_dev_put(rp);
 	pci_unlock_rescan_remove();
 
 	return 0;

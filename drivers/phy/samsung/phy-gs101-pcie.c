@@ -20,7 +20,6 @@
 #include <linux/platform_device.h>
 
 struct gs101_pcie_phy {
-	struct device		*dev;
 	void __iomem		*phy_base;
 	void __iomem		*pcs_base;
 	void __iomem		*elbi_base;
@@ -296,7 +295,6 @@ static void gs101_pcie_phy_config(struct gs101_pcie_phy *phy)
 	val |= (0x1 << 4);
 	val &= ~(0x1 << 3);
 	writel(val, phy_base_regs + 0x5D0);
-	pr_debug("XO clock configuration : 0x%x\n", readl(phy_base_regs + 0x5D0));
 
 	/* AFC cal mode by default uses the calibrated value from a previous
 	 * run. However on some devices this causes a CDR failure because
@@ -304,7 +302,6 @@ static void gs101_pcie_phy_config(struct gs101_pcie_phy *phy)
 	 * always start from an initial value (determined through simulation)
 	 * ensures that AFC has enough time to complete.
 	 */
-	dev_info(phy->dev, "AFC cal mode set to restart\n");
 	writel(0x4, phy_base_regs + 0xBF4);
 }
 
@@ -350,8 +347,6 @@ static int gs101_pcie_phy_probe(struct platform_device *pdev)
 	phy = devm_kzalloc(dev, sizeof(*phy), GFP_KERNEL);
 	if (!phy)
 		return -ENOMEM;
-
-	phy->dev = dev;
 
 	phy->phy_base = devm_platform_ioremap_resource_byname(pdev, "phy");
 	if (IS_ERR(phy->phy_base))

@@ -167,14 +167,6 @@ static int irq_polarity = -1;
 module_param(irq_polarity, int, 0444);
 MODULE_PARM_DESC(irq_polarity, "IRQ polarity 0: active-high 1: active-low");
 
-static uint init_speed_override;
-module_param(init_speed_override, uint, 0644);
-MODULE_PARM_DESC(init_speed_override, "Override initial UART baud rate (0: use DT)");
-
-static bool no_early_baudrate;
-module_param(no_early_baudrate, bool, 0644);
-MODULE_PARM_DESC(no_early_baudrate, "Skip the vendor baud rate change before setup");
-
 static inline void host_set_baudrate(struct hci_uart *hu, unsigned int speed)
 {
 	if (hu->serdev)
@@ -502,17 +494,11 @@ out:
 		else
 			hu->init_speed = bcm->dev->init_speed;
 
-		if (init_speed_override)
-			hu->init_speed = init_speed_override;
-
 		/* If oper_speed is set, ldisc/serdev will set the baudrate
 		 * before calling setup()
 		 */
 		if (!bcm->dev->no_early_set_baudrate && !bcm->dev->use_autobaud_mode)
 			hu->oper_speed = bcm->dev->oper_speed;
-
-		if (no_early_baudrate)
-			hu->oper_speed = 0;
 
 		err = bcm_gpio_set_power(bcm->dev, true);
 

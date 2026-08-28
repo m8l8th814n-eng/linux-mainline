@@ -96,22 +96,9 @@ enum gs101_dpp_reg_bank {
  * Both size registers pack the height into the high half and the width low --
  * that is what regs-dpp.h says (IDMA_SRC_HEIGHT at 16, IDMA_SRC_WIDTH at 0)
  * and what the bootloader's 0x09600438 decodes to for a 1080x2400 panel.
- *
- * size_swapped exists because writing that layout, verified by reading the
- * registers back, did not change the picture. Setting it puts the width in the
- * high half instead, which is wrong according to the header but tests the
- * header rather than trusting it.
  */
-static bool size_swapped;
-module_param(size_swapped, bool, 0644);
-MODULE_PARM_DESC(size_swapped,
-		 "Write DPP size registers as width:height instead of height:width");
-
 static u32 rdma_size(u32 w, u32 h)
 {
-	if (size_swapped)
-		return ((w & 0xffff) << 16) | (h & 0xffff);
-
 	return ((h & 0xffff) << 16) | (w & 0xffff);
 }
 
@@ -138,11 +125,8 @@ struct gs101_dpp {
 	struct device *dev;
 	void __iomem *regs[DPP_REG_COUNT];
 	struct clk_bulk_data clks[ARRAY_SIZE(gs101_dpp_clk_names)];
-	int irq_dma;
-	int irq_dpp;
 	struct drm_plane plane;
 	u32 id;
-	unsigned long attr;
 };
 
 static inline struct gs101_dpp *plane_to_dpp(struct drm_plane *plane)
@@ -255,11 +239,6 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 	 */
 	src_w = fb->pitches[0] / fb->format->cpp[0];
 
-	dev_info_once(dpp->dev,
-		      "DPP%u: %ux%u in a %u-wide buffer, pitch %u, format %p4cc\n",
-		      dpp->id, fb->width, fb->height, src_w, fb->pitches[0],
-		      &fb->format->format);
-
 	/*
 	 * Stop inheriting the format too. The bootloader left BGRA8888, which
 	 * honours the fourth byte as alpha. An XR24 buffer leaves that byte
@@ -283,9 +262,6 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 	if (upper_32_bits(addr))
 		dev_warn_once(dpp->dev,
 			      "DPP%u: address %pad does not fit RDMA_BASEADDR_Y8\n",
-			      dpp->id, &addr);
-	else
-		dev_info_once(dpp->dev, "DPP%u: scanning out from %pad\n",
 			      dpp->id, &addr);
 
 	writel(lower_32_bits(addr), dpp->regs[DPP_REG_DMA] + RDMA_BASEADDR_Y8);
@@ -316,15 +292,6 @@ static const struct drm_plane_funcs gs101_dpp_plane_funcs = {
 	.atomic_duplicate_state	= drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
 };
-
-/*
- * TODO: dpp_reg_get_irq_and_clear() (dpp_reg.c:972). The DMA interrupt
- * reports underrun and read errors, which are the ones worth acting on.
- */
-static irqreturn_t __maybe_unused gs101_dpp_irq(int irq, void *data)
-{
-	return IRQ_NONE;
-}
 
 /* ------------------------------------------------------------------ */
 /* Component                                                            */
@@ -383,9 +350,6 @@ static int gs101_dpp_bind(struct device *dev, struct device *master,
 
 	drm_plane_helper_add(&dpp->plane, &gs101_dpp_plane_helper_funcs);
 
-	dev_info(dev, "DPP%u bound, plane registered (attr %#lx)\n",
-		 dpp->id, dpp->attr);
-
 	return 0;
 }
 
@@ -424,7 +388,6 @@ static int gs101_dpp_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct gs101_dpp *dpp;
 	unsigned int i;
-	u32 attr;
 	int ret;
 
 	dpp = devm_kzalloc(dev, sizeof(*dpp), GFP_KERNEL);
@@ -436,8 +399,6 @@ static int gs101_dpp_probe(struct platform_device *pdev)
 
 	if (of_property_read_u32(dev->of_node, "dpp,id", &dpp->id))
 		dpp->id = 0;
-	if (!of_property_read_u32(dev->of_node, "attr", &attr))
-		dpp->attr = attr;
 
 	for (i = 0; i < DPP_REG_COUNT; i++) {
 		dpp->regs[i] = devm_platform_ioremap_resource_byname(pdev,
@@ -447,17 +408,6 @@ static int gs101_dpp_probe(struct platform_device *pdev)
 					     "failed to map %s registers\n",
 					     bank_names[i]);
 	}
-
-	/*
-	 * Optional, and absent from the device tree: the SPI numbers for L0's
-	 * DMA and DPP interrupts are not established. Nothing requests them
-	 * yet, so treat missing ones as a fact to record rather than an error
-	 * -- and for the same reason as in DECON, leave them unrequested even
-	 * when present: the bootloader may still be scanning out, and a handler
-	 * that answers IRQ_NONE to a live interrupt gets the line disabled.
-	 */
-	dpp->irq_dma = platform_get_irq_byname_optional(pdev, "dma");
-	dpp->irq_dpp = platform_get_irq_byname_optional(pdev, "dpp");
 
 	/*
 	 * RDMA_BASEADDR_Y8 is a single 32-bit register and atomic_update()

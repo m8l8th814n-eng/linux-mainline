@@ -185,8 +185,6 @@ struct gs101_decon {
 	int irq_frame_done;
 	struct drm_crtc crtc;
 	u32 id;
-	unsigned int frame_count;
-	unsigned int vblank_reports;	/* TODO: diagnostic, remove */
 };
 
 static inline struct gs101_decon *crtc_to_decon(struct drm_crtc *crtc)
@@ -251,8 +249,6 @@ static void gs101_decon_atomic_enable(struct drm_crtc *crtc,
 				      struct drm_atomic_commit *state)
 {
 	struct gs101_decon *decon = crtc_to_decon(crtc);
-
-	dev_info_once(decon->dev, "DECON%u: atomic_enable\n", decon->id);
 
 	pm_runtime_get_sync(decon->dev);
 
@@ -344,16 +340,6 @@ static int gs101_decon_enable_vblank(struct drm_crtc *crtc)
 	struct gs101_decon *decon = crtc_to_decon(crtc);
 	void __iomem *reg = decon->regs[DECON_REG_MAIN] + DECON_INT_EN;
 
-	dev_info_once(decon->dev, "DECON%u: enable_vblank\n", decon->id);
-
-	/*
-	 * TODO: diagnostic. Rearm the handler's sampling so the next few
-	 * interrupts are logged with vblank supposedly enabled -- the earlier
-	 * samples were all spent before this point and said nothing about the
-	 * state that matters.
-	 */
-	decon->vblank_reports = 0;
-
 	writel(readl(reg) | INT_EN_FRAME_DONE, reg);
 
 	return 0;
@@ -363,8 +349,6 @@ static void gs101_decon_disable_vblank(struct drm_crtc *crtc)
 {
 	struct gs101_decon *decon = crtc_to_decon(crtc);
 	void __iomem *reg = decon->regs[DECON_REG_MAIN] + DECON_INT_EN;
-
-	dev_info_once(decon->dev, "DECON%u: disable_vblank\n", decon->id);
 
 	writel(readl(reg) & ~INT_EN_FRAME_DONE, reg);
 }
@@ -387,10 +371,6 @@ static const struct drm_crtc_funcs gs101_decon_crtc_funcs = {
  * Interrupts are write-one-to-clear, and clearing has to happen even for bits
  * nothing acts on yet -- a pending bit left set re-triggers immediately, and a
  * handler that keeps answering IRQ_NONE gets the line disabled as spurious.
- *
- * TODO: once a CRTC exists, frame done calls drm_crtc_handle_vblank(). Until
- * then this only establishes whether the interrupt fires at all, which is the
- * one thing that decides whether tear-free page flipping is reachable.
  */
 static irqreturn_t gs101_decon_irq(int irq, void *data)
 {
@@ -409,55 +389,15 @@ static irqreturn_t gs101_decon_irq(int irq, void *data)
 	 */
 	writel(pend, decon->regs[DECON_REG_MAIN] + DECON_INT_PEND);
 
-	if (pend & INT_PEND_FRAME_DONE) {
-		/*
-		 * Log the first one and then stay quiet: at 60 Hz this runs
-		 * sixty times a second, and the only question right now is
-		 * whether it runs at all.
-		 */
-		if (!decon->frame_count++)
-			dev_info(decon->dev,
-				 "DECON%u: frame_done interrupt is live\n",
-				 decon->id);
-
-		/*
-		 * num_crtcs is set by drm_vblank_init(), which only runs on
-		 * the way to drm_dev_register(). Without it dev->vblank is
-		 * NULL and drm_crtc_handle_vblank() would dereference it --
-		 * and this interrupt is live from probe, long before any of
-		 * that. The guard goes away when registration is switched on.
-		 */
-		if (decon->crtc.dev && decon->crtc.dev->num_crtcs) {
-			bool handled = drm_crtc_handle_vblank(&decon->crtc);
-
-			/*
-			 * TODO: diagnostic, remove. The interrupt runs at
-			 * 60 Hz but the vblank counter does not advance, so
-			 * either this is never reached or drm_handle_vblank()
-			 * bails on !vblank->enabled.
-			 */
-			if (handled)
-				dev_info_once(decon->dev,
-					      "DECON%u: vblank counter advancing\n",
-					      decon->id);
-			else if (decon->vblank_reports < 3) {
-				decon->vblank_reports++;
-				dev_info(decon->dev,
-					 "DECON%u: handle_vblank -> %d (count %llu, pend %#x, int_en %#x)\n",
-					 decon->id, handled,
-					 drm_crtc_vblank_count(&decon->crtc),
-					 pend,
-					 readl(decon->regs[DECON_REG_MAIN] +
-					       DECON_INT_EN));
-			}
-		} else if (!decon->vblank_reports) {
-			decon->vblank_reports++;
-			dev_info(decon->dev,
-				 "DECON%u: vblank guard closed (dev=%d crtcs=%d)\n",
-				 decon->id, !!decon->crtc.dev,
-				 decon->crtc.dev ? decon->crtc.dev->num_crtcs : -1);
-		}
-	}
+	/*
+	 * num_crtcs is set by drm_vblank_init(), which only runs on the way to
+	 * drm_dev_register(). Without it dev->vblank is NULL and
+	 * drm_crtc_handle_vblank() would dereference it -- and this interrupt is
+	 * live from probe, long before any of that.
+	 */
+	if (pend & INT_PEND_FRAME_DONE &&
+	    decon->crtc.dev && decon->crtc.dev->num_crtcs)
+		drm_crtc_handle_vblank(&decon->crtc);
 
 	return IRQ_HANDLED;
 }
@@ -650,14 +590,8 @@ static int gs101_decon_bind(struct device *dev, struct device *master,
 	return 0;
 }
 
-static void gs101_decon_unbind(struct device *dev, struct device *master,
-			       void *data)
-{
-}
-
 static const struct component_ops gs101_decon_component_ops = {
 	.bind	= gs101_decon_bind,
-	.unbind	= gs101_decon_unbind,
 };
 
 static void gs101_decon_remove(struct platform_device *pdev)

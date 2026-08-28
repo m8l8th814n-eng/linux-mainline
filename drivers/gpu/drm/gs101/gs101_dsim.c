@@ -268,14 +268,8 @@ static int gs101_dsim_bind(struct device *dev, struct device *master,
 	return 0;
 }
 
-static void gs101_dsim_unbind(struct device *dev, struct device *master,
-			      void *data)
-{
-}
-
 static const struct component_ops gs101_dsim_component_ops = {
 	.bind	= gs101_dsim_bind,
-	.unbind	= gs101_dsim_unbind,
 };
 
 /*

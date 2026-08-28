@@ -2287,7 +2287,6 @@
 					shutdown-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
 					device-wakeup-gpios = <&gpp14 3 GPIO_ACTIVE_HIGH>;
 					host-wakeup-gpios = <&gpa6 6 GPIO_ACTIVE_HIGH>;
-					current-speed = <3000000>;
 					max-speed = <3000000>;
 				};
 			};
@@ -2321,6 +2320,7 @@
 			interrupts = <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 421 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 419 IRQ_TYPE_LEVEL_HIGH 0>;
+			dma-coherent;
 		};
 
 		mbox_aoc: mailbox@176a0000 {

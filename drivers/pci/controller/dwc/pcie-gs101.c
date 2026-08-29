@@ -458,7 +458,10 @@ int exynos_pcie_poweron(int ch_num, int spd, int width)
 	pci_lock_rescan_remove();
 	rp = pci_get_slot(pp->bridge->bus, PCI_DEVFN(0, 0));
 	if (rp && rp->subordinate) {
+		struct resource *win = &rp->resource[PCI_BRIDGE_MEM_WINDOW];
+
 		pci_scan_child_bus(rp->subordinate);
+		win->flags &= ~IORESOURCE_DISABLED;
 		pci_assign_unassigned_bridge_resources(rp);
 		pci_bus_add_devices(rp->subordinate);
 	} else {
@@ -517,6 +520,13 @@ void exynos_pcie_rc_set_cpl_timeout_state(int ch_num, bool recovery)
 {
 }
 EXPORT_SYMBOL_GPL(exynos_pcie_rc_set_cpl_timeout_state);
+
+static void gs101_pcie_fixup_cp_class(struct pci_dev *pdev)
+{
+	if (pdev->class == 0)
+		pdev->class = PCI_CLASS_COMMUNICATION_OTHER << 8;
+}
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SAMSUNG, 0xa5a5, gs101_pcie_fixup_cp_class);
 
 static const struct of_device_id gs101_pcie_of_match[] = {
 	{ .compatible = "google,gs101-pcie" },

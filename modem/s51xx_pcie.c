@@ -519,9 +519,9 @@ static void s51xx_pcie_remove(struct pci_dev *pdev)
 	pci_release_regions(pdev);
 }
 
-/* For Test */
 static struct pci_device_id s51xx_pci_id_tbl[] = {
-	{ PCI_VENDOR_ID_SAMSUNG, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID, },   // SC Basic
+	{ PCI_VENDOR_ID_SAMSUNG, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
+	  PCI_CLASS_COMMUNICATION_OTHER << 8, 0xffff00 },
 	{ }
 };
 

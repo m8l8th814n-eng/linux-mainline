@@ -30,6 +30,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_mode_config.h>
+#include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_of.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
@@ -53,6 +54,10 @@ static const struct drm_driver gs101_drm_driver = {
 	 * drm_client_setup() after registration; drm_fbdev_dma_setup() is gone.
 	 */
 	DRM_FBDEV_DMA_DRIVER_OPS,
+};
+
+static const struct drm_mode_config_helper_funcs gs101_drm_mode_config_helper_funcs = {
+	.atomic_commit_tail	= drm_atomic_helper_commit_tail_rpm,
 };
 
 static const struct drm_mode_config_funcs gs101_drm_mode_config_funcs = {
@@ -271,6 +276,7 @@ static int gs101_drm_bind(struct device *dev)
 	drm->mode_config.max_width = 4096;
 	drm->mode_config.max_height = 4096;
 	drm->mode_config.funcs = &gs101_drm_mode_config_funcs;
+	drm->mode_config.helper_private = &gs101_drm_mode_config_helper_funcs;
 
 	/* Brings in DECON, and later DPP and DSIM. */
 	ret = component_bind_all(dev, drm);

@@ -263,9 +263,14 @@ static void gs101_decon_atomic_disable(struct drm_crtc *crtc,
 {
 	struct gs101_decon *decon = crtc_to_decon(crtc);
 
-	drm_crtc_vblank_off(crtc);
-
 	gs101_decon_hw_stop(decon);
+
+	if (crtc->state->event && !crtc->state->active) {
+		spin_lock_irq(&crtc->dev->event_lock);
+		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+		spin_unlock_irq(&crtc->dev->event_lock);
+		crtc->state->event = NULL;
+	}
 
 	pm_runtime_put_sync(decon->dev);
 }

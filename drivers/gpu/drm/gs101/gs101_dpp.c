@@ -199,7 +199,7 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 	struct gs101_dpp *dpp = plane_to_dpp(plane);
 	struct drm_framebuffer *fb;
 	dma_addr_t addr;
-	u32 src_w, val;
+	u32 src_w, img_w, img_h, val;
 
 	if (!new_state->fb || !new_state->crtc)
 		return;
@@ -238,6 +238,8 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 	 * by a pixel or eight per line, colours intact, unreadable.
 	 */
 	src_w = fb->pitches[0] / fb->format->cpp[0];
+	img_w = drm_rect_width(&new_state->src) >> 16;
+	img_h = drm_rect_height(&new_state->src) >> 16;
 
 	/*
 	 * Stop inheriting the format too. The bootloader left BGRA8888, which
@@ -254,7 +256,7 @@ static void gs101_dpp_atomic_update(struct drm_plane *plane,
 
 	writel(rdma_size(src_w, fb->height),
 	       dpp->regs[DPP_REG_DMA] + RDMA_SRC_SIZE);
-	writel(rdma_size(fb->width, fb->height),
+	writel(rdma_size(img_w, img_h),
 	       dpp->regs[DPP_REG_DMA] + RDMA_IMG_SIZE);
 
 	addr = drm_fb_dma_get_gem_addr(fb, new_state, 0);

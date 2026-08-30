@@ -107,7 +107,20 @@ struct aoc_control_block *aoc_control;
 static int aoc_major;
 
 static const char *default_firmware = "aoc.bin";
-static bool aoc_autoload_firmware = false;
+/*
+ * Loaded automatically from probe, unlike the vendor driver.
+ *
+ * The vendor default is false because Android has a userspace
+ * component that writes the sysfs "firmware" attribute at boot.
+ * There is none here, and the reset path does not work (the ACPM
+ * callback is stubbed), so only the first load after a cold boot is
+ * ever useful anyway -- which is exactly what probe gives us.
+ *
+ * Override from the kernel command line without rebuilding:
+ *   aoc_core.aoc_autoload_firmware=0   leave the load to sysfs
+ *   modprobe.blacklist=aoc_core        do not load the driver at all
+ */
+static bool aoc_autoload_firmware = true;
 module_param(aoc_autoload_firmware, bool, 0644);
 MODULE_PARM_DESC(aoc_autoload_firmware, "Automatically load firmware if true");
 
@@ -130,7 +143,16 @@ MODULE_PARM_DESC(aoc_autoload_firmware, "Automatically load firmware if true");
  *
  * Default 0: safe, does nothing, proves the mechanism works.
  */
-static int aoc_stop_at = 0;
+/*
+ * Default 6: run the whole sequence.
+ *
+ * This started at 0 because loading firmware used to wedge the SoC
+ * hard, as the comment above describes. That is no longer the case --
+ * the sequence has been run many times without the machine dying --
+ * so the guard has served its purpose. Lower it again from sysfs or
+ * the command line (aoc_core.aoc_stop_at=N) to step through stages.
+ */
+static int aoc_stop_at = 6;
 module_param(aoc_stop_at, int, 0644);
 MODULE_PARM_DESC(aoc_stop_at,
 		 "Stop the firmware boot sequence after stage N (0-6, default 0)");
@@ -180,6 +202,8 @@ MODULE_PARM_DESC(smc_probe_addr,
 		}							\
 		dev_info(dev, "stage %d: %s\n", (n), what);		\
 	} while (0)
+
+static struct aoc_prvdata *aoc_probe_prvdata;
 
 static int aoc_force_magic_set(const char *val, const struct kernel_param *kp);
 
@@ -293,12 +317,38 @@ bool aoc_fw_ready(void)
 
 static int aoc_force_magic_set(const char *val, const struct kernel_param *kp)
 {
+	struct aoc_prvdata *prvdata = aoc_probe_prvdata;
+
 	if (!aoc_control)
 		return -ENODEV;
 
 	pr_info("aoc: ipc magic was %#x, forcing %#x\n", aoc_control->magic,
 		AOC_MAGIC);
 	aoc_control->magic = AOC_MAGIC;
+	/* Write-combining carveout; make it visible before acting on it. */
+	wmb();
+
+	/*
+	 * Drive the transition too, which writing the word alone does not.
+	 *
+	 * The only path to AOC_STATE_ONLINE is in aoc_mbox_rx_callback(): it
+	 * needs a doorbell to arrive *after* aoc_fw_ready() turns true. AoC
+	 * rings ten times within 400 us of starting and then faults, so there
+	 * is no way to win that race from userspace.
+	 *
+	 * This is a bring-up probe, not a fix: it answers whether the A32 is
+	 * still alive once FF1 has died -- if the services enumerate and
+	 * sound-aoc leaves deferred probe, playback does not depend on the
+	 * core that crashed.
+	 */
+	if (prvdata && aoc_state == AOC_STATE_FIRMWARE_LOADED && aoc_fw_ready()) {
+		aoc_state = AOC_STATE_STARTING;
+		schedule_work(&prvdata->online_work);
+		pr_info("aoc: forced transition to STARTING\n");
+	} else {
+		pr_info("aoc: not transitioning (prvdata=%p state=%d ready=%d)\n",
+			prvdata, aoc_state, aoc_fw_ready());
+	}
 
 	return 0;
 }
@@ -440,8 +490,21 @@ static void aoc_mbox_rx_callback(struct mbox_client *cl, void *mssg)
 
 	switch (aoc_state) {
 	case AOC_STATE_FIRMWARE_LOADED:
-		pr_info_ratelimited("aoc: ipc at %p magic=%#x\n", aoc_control,
-				    aoc_control ? aoc_control->magic : 0);
+		/* BRING-UP DIAGNOSTIC -- remove once AoC comes online. */
+		{
+			const u32 *w = mssg;
+			const u32 *ipc = (const u32 *)aoc_control;
+
+			pr_info_ratelimited("aoc: doorbell ch%d mbox=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+					    slot->index, w[0], w[1], w[2], w[3],
+					    w[4], w[5], w[6], w[7]);
+			if (ipc)
+				pr_info_ratelimited("aoc: ipc at %p = %08x %08x %08x %08x %08x %08x %08x %08x (want magic %#x)\n",
+						    aoc_control, ipc[0], ipc[1], ipc[2], ipc[3],
+						    ipc[4], ipc[5], ipc[6], ipc[7], AOC_MAGIC);
+			else
+				pr_info_ratelimited("aoc: aoc_control is NULL\n");
+		}
 		if (aoc_fw_ready()) {
 			aoc_state = AOC_STATE_STARTING;
 			schedule_work(&prvdata->online_work);
@@ -496,6 +559,18 @@ static void aoc_pass_fw_information(void *base, const struct aoc_fw_data *fwd,
 		writel_relaxed(sizeof(u32), data++);
 		writel_relaxed(fwd[i].value, data++);
 	}
+
+	/*
+	 * The carveout is mapped write-combining, and writel_relaxed() carries
+	 * no barrier, so nothing orders these stores against the Device-nGnRE
+	 * mailbox write that starts AoC a moment later. Make the block visible
+	 * before the core can read it.
+	 *
+	 * Not in the vendor driver, which runs the same code -- so this is not
+	 * known to be what breaks here, only that the ordering is not
+	 * guaranteed by anything.
+	 */
+	wmb();
 }
 
 static u32 aoc_board_config_parse(struct device_node *node, u32 *board_id, u32 *board_rev)
@@ -599,6 +674,7 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	phys_addr_t capture_heap = aoc_dram_translate_to_aoc(prvdata, prvdata->audio_capture_heap_base);
 	unsigned int i;
 	bool fw_signed, gsa_enabled;
+	bool fw_authenticated = false;
 
 	struct aoc_fw_data fw_data[] = {
 		{ .key = kAOCBoardID, .value = board_id },
@@ -641,6 +717,10 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 		dev_err(dev, "Failed to load AoC firmware image\n");
 		return;
 	}
+
+	/* BRING-UP DIAGNOSTIC -- remove once AoC comes online. */
+	dev_info(dev, "loaded \"%s\": %zu bytes\n", prvdata->firmware_name,
+		 fw->size);
 
 	if (prvdata->force_release_aoc) {
 		dev_info(dev, "Force Reload Trigger: Free current loaded\n");
@@ -742,6 +822,11 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 
 	aoc_control = aoc_dram_translate(prvdata, ipc_offset);
 
+	/* BRING-UP DIAGNOSTIC -- remove once AoC comes online. */
+	dev_info(dev, "ipc block: offset %#x -> pa %#llx, va %p\n", ipc_offset,
+		 (unsigned long long)prvdata->dram_resource.start + ipc_offset,
+		 aoc_control);
+
 	{
 		bool commit_rc;
 
@@ -750,6 +835,11 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 		if (!commit_rc) {
 			dev_err(dev, "FW commit failed!\n");
 		}
+
+		/* Same reason as in aoc_pass_fw_information(): the image has
+		 * to be in DRAM before GSA authenticates it over DMA.
+		 */
+		wmb();
 	}
 
 	gsa_enabled = of_property_read_bool(prvdata->dev->of_node, "gsa-enabled");
@@ -757,6 +847,26 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	if (gsa_enabled) {
 		int rc;
 
+		/*
+		 * Required here, even though the vendor calls it only in the
+		 * non-GSA branch.
+		 *
+		 * The vendor's GSA branch calls aoc_configure_iommu_fault_
+		 * handler() instead and lets the secure side program AoC's
+		 * translation. There is no secure side here -- this kernel
+		 * takes EL2 itself, so no pKVM is resident and no Trusty
+		 * hwmgr runs -- so nobody else fills in the SysMMU.
+		 *
+		 * Measured on kernel #184 with this call removed: AoC starts,
+		 * immediately reads its bootloader at AOC_BINARY_DRAM_BASE +
+		 * bootloader_offset and dies on an unmapped address:
+		 *
+		 *   SysMMU READ PAGE FAULT from 1a090000.sysmmu VID 0
+		 *   at 0x98001000
+		 *
+		 * repeated until the watchdog fires. The AP has to program
+		 * the page tables here.
+		 */
 		AOC_STAGE(3, "aoc_configure_iommu()");
 		aoc_configure_iommu(prvdata, fw);
 
@@ -765,6 +875,8 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 			dev_err(dev, "GSA: FW authentication failed: %d\n", rc);
 			goto free_fw;
 		}
+
+		fw_authenticated = true;
 	} else {
 		AOC_STAGE(3, "aoc_configure_iommu()");
 		aoc_configure_iommu(prvdata, fw);
@@ -774,6 +886,33 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	}
 
 	AOC_STAGE(5, "aoc_pass_fw_information()");
+
+	/* BRING-UP DIAGNOSTIC -- remove once AoC comes online. */
+	{
+		static const char * const fw_data_names[] = {
+			"BoardID", "BoardRevision", "SRAMRepaired",
+			"ASVTableVersion", "CarveoutAddress", "CarveoutSize",
+			"SensorDirectHeapAddress", "SensorDirectHeapSize",
+			"ForceVNOM", "DisableMM", "EnableUART",
+			"PlaybackHeapAddress", "PlaybackHeapSize",
+			"CaptureHeapAddress", "CaptureHeapSize",
+			"ForceSpeakerUltrasonic", "RandSeed", "ChipRevision",
+			"ChipType", "GnssType", "VolteReleaseMif",
+			"ChipProductId", "WifiChip",
+		};
+		unsigned int k;
+
+		for (k = 0; k < ARRAY_SIZE(fw_data); k++) {
+			u32 idx = fw_data[k].key - kAOCBoardID;
+			const char *name = idx < ARRAY_SIZE(fw_data_names) ?
+				fw_data_names[idx] : "?";
+
+			dev_info(dev, "fw_data[%u] %#06x %-24s = %#010x (%u)\n",
+				 k, fw_data[k].key, name,
+				 fw_data[k].value, fw_data[k].value);
+		}
+	}
+
 	aoc_pass_fw_information(aoc_dram_translate(prvdata, ipc_offset),
 			fw_data, ARRAY_SIZE(fw_data));
 
@@ -788,11 +927,26 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	if (gsa_enabled) {
 		int rc = gsa_send_aoc_cmd(prvdata->gsa_dev, GSA_AOC_START);
 
-		if (rc >= 0 && rc != GSA_AOC_STATE_RUNNING) {
+		/*
+		 * Both commands are needed on this path. START alone does not
+		 * run AoC.
+		 *
+		 * Measured on kernel #183 with RELEASE_RESET removed: the
+		 * mailbox state goes 1 -> 4 on START and stays there. AoC
+		 * never executes -- no mailbox doorbell arrives, and the
+		 * coredump region keeps its invalid magic, so not a single
+		 * instruction ran. Putting RELEASE_RESET back moves 4 -> 2 and
+		 * AoC starts.
+		 *
+		 * The mailbox state machine therefore has four states, while
+		 * enum gsa_aoc_state defines three. That enum describes the
+		 * Trusty hwmgr service, which is what the vendor driver talks
+		 * to and where START alone suffices; there is no Trusty here.
+		 * Do not compare these replies against gsa_aoc_state.
+		 */
+		if (rc >= 0)
 			rc = gsa_send_aoc_cmd(prvdata->gsa_dev,
 					      GSA_AOC_RELEASE_RESET);
-			dev_info(dev, "GSA release reset: state=%d\n", rc);
-		}
 
 		if (rc < 0 && aoc_stop_at >= 6) {
 			dev_warn(dev, "GSA start unavailable, releasing from reset on the AP\n");
@@ -824,6 +978,19 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	return;
 
 free_fw:
+	/*
+	 * Hand the image back if we authenticated but never started AoC.
+	 *
+	 * GSA keeps the loaded image until it is explicitly unloaded, and
+	 * gsa_unload_aoc_fw_image() is otherwise only reached from
+	 * aoc_take_offline(). Bailing out between authentication and start --
+	 * which every aoc_stop_at value in 3..5 does -- therefore left GSA
+	 * holding it, and every later load failed with "mbox cmd=0x5a returned
+	 * err=3" and -EBUSY until the device was rebooted.
+	 */
+	if (fw_authenticated)
+		gsa_unload_aoc_fw_image(prvdata->gsa_dev);
+
 	/* Change aoc_state to offline due to abnormal firmware */
 	aoc_state = AOC_STATE_OFFLINE;
 	release_firmware(fw);
@@ -2012,6 +2179,91 @@ static void aoc_watchdog(struct work_struct *work)
 		}
 	}
 
+	/*
+	 * BRING-UP DIAGNOSTIC -- remove once AoC comes online.
+	 *
+	 * Without an sscd driver the coredump is never handed anywhere, so the
+	 * only thing that ever reached the log was the crash-reason string.
+	 * The header also carries per-core register, cache, TLB and trace
+	 * sections plus the breadcrumbs, and for a "PC=0x00000000" fault the
+	 * A32 register block is what says where it jumped from.
+	 *
+	 * This has to happen here rather than from userspace: the carveout is
+	 * nomap and mapped write-combining by devm_ioremap_wc(), while /dev/mem
+	 * hands out Device-nGnRE for it. Mixing Device and Normal attributes on
+	 * one physical address is architecturally unpredictable on arm64, and
+	 * devmem2 duly returned a corrupt magic and an all-zero section array
+	 * for a header the driver itself had just parsed successfully.
+	 */
+	{
+		size_t i;
+
+		dev_info(prvdata->dev,
+			 "coredump hdr: valid=%u sections=%u platform=%u version=%u auth=%u\n",
+			 ramdump_header->valid, ramdump_header->num_sections,
+			 (unsigned int)ramdump_header->platform,
+			 ramdump_header->version,
+			 (unsigned int)ramdump_header->debug_authorized);
+
+		dev_info(prvdata->dev,
+			 "coredump breadcrumbs: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			 ramdump_header->breadcrumbs[0], ramdump_header->breadcrumbs[1],
+			 ramdump_header->breadcrumbs[2], ramdump_header->breadcrumbs[3],
+			 ramdump_header->breadcrumbs[4], ramdump_header->breadcrumbs[5],
+			 ramdump_header->breadcrumbs[6], ramdump_header->breadcrumbs[7]);
+		dev_info(prvdata->dev,
+			 "coredump breadcrumbs: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+			 ramdump_header->breadcrumbs[8], ramdump_header->breadcrumbs[9],
+			 ramdump_header->breadcrumbs[10], ramdump_header->breadcrumbs[11],
+			 ramdump_header->breadcrumbs[12], ramdump_header->breadcrumbs[13],
+			 ramdump_header->breadcrumbs[14], ramdump_header->breadcrumbs[15]);
+
+		for (i = 0; i < RAMDUMP_NUM_SECTIONS; i++) {
+			const struct aoc_section_header *sec =
+				&ramdump_header->sections[i];
+
+			dev_info(prvdata->dev,
+				 "coredump sec[%zu] \"%.16s\" type=%u core=%u flags=%#x offset=%#x size=%#x vma=%#x lma=%#x\n",
+				 i, sec->name, (unsigned int)sec->type, sec->core,
+				 sec->flags, sec->offset, sec->size, sec->vma,
+				 sec->lma);
+		}
+
+		for (i = 0; i < RAMDUMP_NUM_SECTIONS; i++) {
+			const struct aoc_section_header *sec =
+				&ramdump_header->sections[i];
+			const u32 *regs;
+			size_t words, w;
+
+			if (sec->type != SECTION_TYPE_CPU_REGISTER)
+				continue;
+			if (!(sec->flags & RAMDUMP_FLAG_VALID) || !sec->size)
+				continue;
+			/* Section data is stored relative to the header. */
+			if ((u64)RAMDUMP_HEADER_OFFSET + sec->offset + sec->size >
+			    prvdata->dram_size) {
+				dev_info(prvdata->dev,
+					 "coredump sec[%zu] out of carveout, skipping\n", i);
+				continue;
+			}
+
+			regs = (const u32 *)((const char *)ramdump_header + sec->offset);
+			words = min_t(size_t, sec->size / sizeof(u32), 48);
+
+			for (w = 0; w < words; w += 8)
+				dev_info(prvdata->dev,
+					 "coredump \"%.16s\" r%02zu: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+					 sec->name, w,
+					 regs[w], w + 1 < words ? regs[w + 1] : 0,
+					 w + 2 < words ? regs[w + 2] : 0,
+					 w + 3 < words ? regs[w + 3] : 0,
+					 w + 4 < words ? regs[w + 4] : 0,
+					 w + 5 < words ? regs[w + 5] : 0,
+					 w + 6 < words ? regs[w + 6] : 0,
+					 w + 7 < words ? regs[w + 7] : 0);
+		}
+	}
+
 	if (!skip_carveout_map) {
 		/* In some cases, we don't map AoC carveout as cached due to b/240786634 */
 		num_pages = DIV_ROUND_UP(prvdata->dram_size, PAGE_SIZE);
@@ -2657,6 +2909,7 @@ static int aoc_platform_probe(struct platform_device *pdev)
 		goto err_failed_prvdata_alloc;
 	}
 	platform_set_drvdata(pdev, prvdata);
+	aoc_probe_prvdata = prvdata;
 
 	if (platform_probe_parse_dt(dev, aoc_node) < 0) {
 		rc = -EINVAL;
@@ -2729,8 +2982,28 @@ static int aoc_platform_probe(struct platform_device *pdev)
 	}
 
 
-	strscpy(prvdata->firmware_name, default_firmware,
-		sizeof(prvdata->firmware_name));
+	/*
+	 * Firmware name from the device tree, falling back to the vendor's
+	 * hardcoded default. Neither the vendor driver nor its device tree has
+	 * this property; it is here so the node states outright which blob is
+	 * expected, instead of it being implicit in a string in the driver.
+	 */
+	{
+		const char *fw_name = NULL;
+
+		if (of_property_read_string(dev->of_node, "firmware-name",
+					    &fw_name) == 0 && fw_name) {
+			strscpy(prvdata->firmware_name, fw_name,
+				sizeof(prvdata->firmware_name));
+			dev_info(dev, "firmware \"%s\" (from device tree)\n",
+				 prvdata->firmware_name);
+		} else {
+			strscpy(prvdata->firmware_name, default_firmware,
+				sizeof(prvdata->firmware_name));
+			dev_info(dev, "firmware \"%s\" (driver default, no firmware-name in DT)\n",
+				 prvdata->firmware_name);
+		}
+	}
 
 	rc = allocate_mailbox_channels(prvdata);
 	if (rc) {

@@ -2433,6 +2433,8 @@
 			acpm-ipc-channel = <13>;
 			force-vnom = <0>;
 
+			firmware-name = "aoc.bin";
+
 			gsa-enabled;
 			gsa-device = <&gsa>;
 			iommu-config-persistent;

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Broadcom BCM4775 GNSS over SPI, from the Pixel 6 vendor tree
+# (google-modules/gps/broadcom/bcm47765).
+#
+# Stubs for vendor headers with no mainline equivalent, shared with the other
+# ported vendor modules under the tree root. This driver needs sscoredump for
+# its "coredump" sysfs attribute; nothing else here is vendor-specific.
+ccflags-y	+= -I$(srctree)/vendor-stub-include
+
+obj-$(CONFIG_BCM_GPS_SPI_DRIVER)	+= bcm47765.o
+bcm47765-objs				:= bcm_gps_regs.o bcm_gps_spi.o bbd.o
+
+obj-$(CONFIG_BCM_GPS_PPS_DRIVER)	+= bbd_pps_gpio.o

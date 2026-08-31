@@ -1,0 +1,17 @@
+#
+# Broadcom GNSS driver support
+#
+
+config BCM_GPS_SPI_DRIVER
+	tristate "Broadcom GPS SPI driver"
+	depends on SPI
+	help
+	  Support for the Broadcom BCM4775 GNSS receiver, which hangs off SPI
+	  on gs101. Says nothing about the newer integrated Kepler GNSS found
+	  on zuma and later.
+
+config BCM_GPS_PPS_DRIVER
+	tristate "Broadcom GPS pulse-per-second GPIO"
+	depends on BCM_GPS_SPI_DRIVER
+	help
+	  Exposes the receiver's 1PPS output as a GPIO-backed PPS source.

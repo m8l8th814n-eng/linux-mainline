@@ -664,12 +664,6 @@
 	};
 };
 
-&aoc {
-	sensor_1v8-supply = <&s2mpg11_ldo7s>;
-	sensor_3v3-supply = <&s2mpg11_ldo6s>;
-	sensor_power_list = "sensor_1v8", "sensor_3v3";
-};
-
 &gpu {
      mali-supply = <&buck2s_reg>;
      buck8s-supply = <&buck8s_reg>;
@@ -1129,7 +1123,7 @@
 		reg = <0>;
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";
-		spi-max-frequency = <11000000>;
+		spi-max-frequency = <25000000>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&cs35l41_l_irq>, <&cs35l41_l_rst>;
@@ -1145,7 +1139,26 @@
 		cirrus,boost-ind-nanohenry = <1000>;
 		cirrus,boost-cap-microfarad = <30>;
 		cirrus,asp-sdout-hiz = <3>;
-		cirrus,left-channel-amp;
+
+		/*
+		 * Drive the interrupt out of GPIO2, which is what the
+		 * interrupts property above listens to. The vendor sets
+		 * this through a cirrus,gpio-config2 child node; mainline
+		 * spells the same thing as flat properties, so the vendor
+		 * form would have been ignored silently.
+		 */
+		cirrus,gpio2-src-select = <0x5>;
+		cirrus,gpio2-output-enable;
+
+		controller-data {
+			/*
+			 * Compensate the MISO round trip. spi-s3c64xx writes
+			 * FB_CLK on every message and leaves it at 0 when this
+			 * node is absent, which is too tight for reads at the
+			 * 25 MHz the vendor runs these amps at.
+			 */
+			samsung,spi-feedback-delay = <1>;
+		};
 	};
 
 	cs35l41_r: speaker-amp@1 {
@@ -1153,7 +1166,7 @@
 		reg = <1>;
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";
-		spi-max-frequency = <11000000>;
+		spi-max-frequency = <25000000>;
 		sound-name-prefix = "R";
 
 		pinctrl-names = "default";
@@ -1170,6 +1183,20 @@
 		cirrus,boost-ind-nanohenry = <1000>;
 		cirrus,boost-cap-microfarad = <30>;
 		cirrus,asp-sdout-hiz = <3>;
+
+		/*
+		 * Drive the interrupt out of GPIO2, which is what the
+		 * interrupts property above listens to. The vendor sets
+		 * this through a cirrus,gpio-config2 child node; mainline
+		 * spells the same thing as flat properties, so the vendor
+		 * form would have been ignored silently.
+		 */
+		cirrus,gpio2-src-select = <0x5>;
+		cirrus,gpio2-output-enable;
+
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+		};
 	};
 };
 
@@ -1218,4 +1245,93 @@
 	sensor_1v8-supply = <&s2mpg11_ldo7s>;
 	sensor_3v3-supply = <&s2mpg11_ldo6s>;
 	sensor_power_list = "sensor_1v8", "sensor_3v3";
+};
+
+/*
+ * GNSS: Broadcom BCM4775 on SPI5.
+ *
+ * A discrete receiver, not the integrated Kepler GNSS that arrives with zuma
+ * -- which is why fw_data[GnssType] stays 0 on this SoC. Ported from the
+ * vendor's gs101-common-gps.dtsi plus gs101-slider2-gps.dtsi, which is the
+ * pin set gs101-raviole.dtsi pulls in for oriole and raven.
+ *
+ * The vendor also sets dma-mode, a pdma0 channel pair and swap-mode on the
+ * controller. Those are properties of its own SPI driver; mainline's
+ * spi-s3c64xx has no equivalent, so the transfers run PIO here.
+ */
+&usi5 {
+	samsung,mode = <USI_MODE_SPI>;
+	status = "okay";
+};
+
+&spi_5 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi5_bus>, <&spi5_cs_func>;
+	status = "okay";
+
+	gnss: bcm4775@0 {
+		compatible = "ssp-spi,bcm4775";
+		reg = <0>;
+		spi-max-frequency = <26000000>;
+		spi-cpol;
+		spi-cpha;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&gps_host_req>, <&gps_mcu_req>,
+			    <&gps_mcu_resp>, <&gps_nstandby>;
+
+		host-req-gpios = <&gpa6 4 GPIO_ACTIVE_HIGH>;
+		mcu-req-gpios = <&gpp1 1 GPIO_ACTIVE_HIGH>;
+		mcu-resp-gpios = <&gpp0 0 GPIO_ACTIVE_HIGH>;
+		nstandby-gpios = <&gpp0 2 GPIO_ACTIVE_LOW>;
+
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+		};
+	};
+};
+
+/ {
+	/* 1PPS output from the receiver. */
+	bbd_pps {
+		compatible = "bbd-pps-gpio";
+		gpios = <&gpp17 1 GPIO_ACTIVE_HIGH>;
+		/*
+		 * assert-falling-edge is read with
+		 * device_property_read_bool(), so a present property is true
+		 * whatever its value. The vendor writes "= <0>" meaning "no",
+		 * which reads as yes; leaving it out is how you say no.
+		 */
+		status = "okay";
+	};
+};
+
+&pinctrl_far_alive {
+	gps_host_req: gps-host-req-pins {
+		samsung,pins = "gpa6-4";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_peric0 {
+	gps_mcu_req: gps-mcu-req-pins {
+		samsung,pins = "gpp1-1";
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+
+	gps_mcu_resp: gps-mcu-resp-pins {
+		samsung,pins = "gpp0-0";
+		samsung,pin-function = <GS101_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_DOWN>;
+	};
+
+	gps_nstandby: gps-nstandby-pins {
+		samsung,pins = "gpp0-2";
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
 };

@@ -329,9 +329,9 @@ static int wc_mbox_probe(struct platform_device *pdev)
 
 	ret = of_property_read_u32(dev->of_node, DT_NON_WAKE_CHANNEL_KEY, &non_wake_mask);
 	if (ret == 0) {
-		if (prvdata->non_waking_services > 0xffff)
+		if (non_wake_mask > 0xffff)
 			dev_err(dev, "Invalid non-waking services mask %#10x",
-				prvdata->non_waking_services);
+				non_wake_mask);
 
 		prvdata->non_waking_services = non_wake_mask;
 	}

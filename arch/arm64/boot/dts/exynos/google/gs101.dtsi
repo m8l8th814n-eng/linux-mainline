@@ -2329,6 +2329,13 @@
 			interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH 0>;
 			mbox-name = "aoc2ap";
 			#mbox-cells = <1>;
+
+			/*
+			 * Channels 12-14 must not wake the AP. Without this
+			 * mask mailbox-wc leaves non_waking_services at 0 and
+			 * every channel becomes a wake source.
+			 */
+			wc-mbox-non-wake-channels = <0x7000>;
 		};
 
 		/*
@@ -2415,6 +2422,9 @@
 
 			interrupts = <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH 0>;
 			interrupt-names = "watchdog";
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&aoc_vsync_pins>;
 
 			iommus = <&sysmmu_aoc>;
 			samsung,iommu-group = <&iommu_group_aoc>;

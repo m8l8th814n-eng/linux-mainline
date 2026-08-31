@@ -203,6 +203,15 @@ MODULE_PARM_DESC(smc_probe_addr,
 		dev_info(dev, "stage %d: %s\n", (n), what);		\
 	} while (0)
 
+/*
+ * Last crash reason printed by the aoc_stop_at=ignore path, so that thirty
+ * ALSA timeouts in a row do not repeat the same two lines thirty times. It is
+ * cleared at the start of every firmware load: suppressing a repeat within one
+ * boot of AoC is useful, suppressing it across a reload hid whether a reload
+ * crashed identically or never started at all.
+ */
+static char aoc_last_crash_reason[RAMDUMP_SECTION_CRASH_INFO_SIZE];
+
 static struct aoc_prvdata *aoc_probe_prvdata;
 
 static int aoc_force_magic_set(const char *val, const struct kernel_param *kp);
@@ -216,6 +225,25 @@ MODULE_PARM_DESC(aoc_force_magic, "Write AOC_MAGIC into the IPC block by hand");
 static bool aoc_ignore_watchdog;
 module_param(aoc_ignore_watchdog, bool, 0644);
 MODULE_PARM_DESC(aoc_ignore_watchdog, "Ignore AoC watchdog interrupts entirely");
+
+/*
+ * BRING-UP: publish the control block ourselves at the first doorbell.
+ *
+ * AoC fills in its aoc_control_block and then faults in SPEECH_IN on FF1
+ * before writing magic and fw_version, which look like a single final
+ * publishing step. Writing magic minutes later (aoc_force_magic) brings the
+ * driver online and registers the sound card, but every command to AoC then
+ * times out. This does the same thing at the earliest possible instant --
+ * inside the doorbell callback, ~22 ms before the watchdog -- to find out
+ * whether the command rings are serviced in that window at all.
+ *
+ * Off by default: once AoC really works, a missing magic is a genuine failure
+ * and must not be papered over.
+ */
+static bool aoc_early_magic;
+module_param(aoc_early_magic, bool, 0644);
+MODULE_PARM_DESC(aoc_early_magic,
+		 "Write AOC_MAGIC from the doorbell callback if AoC filled in the control block but never published it");
 
 static bool aoc_disable_restart = false;
 module_param(aoc_disable_restart, bool, 0644);
@@ -505,6 +533,21 @@ static void aoc_mbox_rx_callback(struct mbox_client *cl, void *mssg)
 			else
 				pr_info_ratelimited("aoc: aoc_control is NULL\n");
 		}
+		if (aoc_early_magic && !aoc_fw_ready() && aoc_control &&
+		    aoc_control->magic == 0 && aoc_control->services != 0) {
+			static bool warned;
+
+			if (!warned) {
+				dev_warn(prvdata->dev,
+					 "publishing control block on AoC's behalf: %u services, magic %#x -> %#x\n",
+					 aoc_control->services, aoc_control->magic,
+					 AOC_MAGIC);
+				warned = true;
+			}
+			aoc_control->magic = AOC_MAGIC;
+			wmb();
+		}
+
 		if (aoc_fw_ready()) {
 			aoc_state = AOC_STATE_STARTING;
 			schedule_work(&prvdata->online_work);
@@ -721,6 +764,9 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	/* BRING-UP DIAGNOSTIC -- remove once AoC comes online. */
 	dev_info(dev, "loaded \"%s\": %zu bytes\n", prvdata->firmware_name,
 		 fw->size);
+
+	/* Every load reports its own crash reason, even an identical one. */
+	aoc_last_crash_reason[0] = 0;
 
 	if (prvdata->force_release_aoc) {
 		dev_info(dev, "Force Reload Trigger: Free current loaded\n");
@@ -991,8 +1037,24 @@ free_fw:
 	if (fw_authenticated)
 		gsa_unload_aoc_fw_image(prvdata->gsa_dev);
 
-	/* Change aoc_state to offline due to abnormal firmware */
-	aoc_state = AOC_STATE_OFFLINE;
+	/*
+	 * Only stand down if this attempt was the live one.
+	 *
+	 * The original comment here read "due to abnormal firmware", but
+	 * free_fw is reached for reasons that say nothing about the image:
+	 * an aoc_stop_at bail, a force_release, or a reload that GSA refuses
+	 * because it still holds the previous image. In that last case the
+	 * running AoC was fine -- it was the circumstances that failed -- and
+	 * marking it offline left 31 service devices and a registered sound
+	 * card pointing at an instance the driver no longer believed in.
+	 * aoc_take_offline() then skipped tearing them down, because it reads
+	 * this very variable to decide whether anything is live.
+	 *
+	 * A genuine first-load failure still lands here with the state at
+	 * FIRMWARE_LOADED or STARTING, and is stood down as before.
+	 */
+	if (aoc_state != AOC_STATE_ONLINE)
+		aoc_state = AOC_STATE_OFFLINE;
 	release_firmware(fw);
 }
 
@@ -1810,6 +1872,17 @@ static void aoc_parse_dmic_power(struct aoc_prvdata *prvdata, struct device_node
 		pr_warn("dmic power count %i is larger than available number.",
 			prvdata->dmic_power_count);
 		prvdata->dmic_power_count = MAX_DMIC_POWER_NUM;
+	} else if (prvdata->dmic_power_count == -EINVAL) {
+		/*
+		 * No dmic_power_list in the device tree, which is the normal
+		 * case here: the vendor's gs101 device tree does not have the
+		 * property either, only sensor_power_list. of_property_count_
+		 * strings() returns -EINVAL for a property that is simply
+		 * absent, so say so instead of reporting it as a failure.
+		 */
+		pr_info("no dmic_power_list in DT, skipping dmic supplies.");
+		prvdata->dmic_power_count = 0;
+		return;
 	} else if (prvdata->dmic_power_count < 0) {
 		pr_err("unsupported dmic power list, err = %i.", prvdata->dmic_power_count);
 		prvdata->dmic_power_count = 0;
@@ -2042,6 +2115,120 @@ static void prepend_fw_builder_to_crash_string(struct aoc_prvdata *prvdata, char
 	crash_info[prefix_size - 1] = ' ';
 }
 
+/*
+ * BRING-UP DIAGNOSTIC.
+ *
+ * We only ever read the crash-reason string out of the coredump, and it has
+ * told us the same thing for days: FF1 died at PC=0. The header carries far
+ * more -- a table of seventeen sections, sixteen breadcrumbs rather than the
+ * two we print, and a debug_authorized byte that decides whether the register
+ * and cache sections are populated at all.
+ *
+ * If the F1 register section is valid it holds the state FF1 was in, and its
+ * link register names the call site that went through the null pointer. That
+ * is the difference between "it died" and "it died here". Dump the table once
+ * per load so we know what the firmware is actually willing to hand over.
+ */
+/*
+ * AoC SRAM is not readable from the AP.
+ *
+ * The firmware image's section table has thirteen entries. Twelve load at
+ * 0x98000000 + their own file offset, which the flat memcpy in
+ * _aoc_fw_commit() places correctly. The thirteenth -- the one the superbin
+ * header calls sram_offset -- is six megabytes that load at address 0, and it
+ * is the section holding SPEECH_INIT, the Cleaner and Eraser strings and the
+ * rest of the speech code. Neither this driver nor the vendor's copies it
+ * there, so GSA or AoC's own bootloader must.
+ *
+ * Reading the first words back to see whether anything landed there took a
+ * synchronous external abort (ESR 0x96000010) inside memcpy_fromio: the bus
+ * refuses AP reads of that region, while the PCU registers higher up the same
+ * window (aoc_pcu_base, 0xb00000) read fine. GSA locking the firmware region
+ * after authenticating it fits both facts.
+ *
+ * So the question "was the SRAM section loaded" cannot be answered from this
+ * side at all. Do not add the read back.
+ */
+
+static void aoc_dump_crash_info(struct aoc_prvdata *prvdata,
+				const struct aoc_ramdump_header *hdr,
+				const struct aoc_section_header *sec)
+{
+	const u8 *p;
+	unsigned int i;
+
+	if (!(sec->flags & RAMDUMP_FLAG_VALID) || !sec->size)
+		return;
+
+	p = (const u8 *)hdr + sec->offset;
+
+	for (i = 0; i < sec->size && i < RAMDUMP_SECTION_CRASH_INFO_SIZE; i += 16) {
+		dev_info(prvdata->dev,
+			 "crashinfo[%03x]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x  |%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c|\n",
+			 i,
+			 p[i+0], p[i+1], p[i+2], p[i+3], p[i+4], p[i+5], p[i+6], p[i+7],
+			 p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13], p[i+14], p[i+15],
+#define PR(x) (p[i+(x)] >= 32 && p[i+(x)] < 127 ? p[i+(x)] : '.')
+			 PR(0), PR(1), PR(2), PR(3), PR(4), PR(5), PR(6), PR(7),
+			 PR(8), PR(9), PR(10), PR(11), PR(12), PR(13), PR(14), PR(15));
+#undef PR
+	}
+}
+
+static void aoc_dump_ramdump_sections(struct aoc_prvdata *prvdata,
+				      const struct aoc_ramdump_header *hdr)
+{
+	struct device *dev = prvdata->dev;
+	u32 n = hdr->num_sections;
+	unsigned int i;
+
+	dev_info(dev, "coredump: platform %u version %u debug_authorized %u, %u sections\n",
+		 hdr->platform, hdr->version, hdr->debug_authorized, n);
+
+	dev_info(dev, "coredump: breadcrumbs %08x %08x %08x %08x %08x %08x %08x %08x\n",
+		 hdr->breadcrumbs[0], hdr->breadcrumbs[1], hdr->breadcrumbs[2],
+		 hdr->breadcrumbs[3], hdr->breadcrumbs[4], hdr->breadcrumbs[5],
+		 hdr->breadcrumbs[6], hdr->breadcrumbs[7]);
+	dev_info(dev, "coredump: breadcrumbs %08x %08x %08x %08x %08x %08x %08x %08x\n",
+		 hdr->breadcrumbs[8], hdr->breadcrumbs[9], hdr->breadcrumbs[10],
+		 hdr->breadcrumbs[11], hdr->breadcrumbs[12], hdr->breadcrumbs[13],
+		 hdr->breadcrumbs[14], hdr->breadcrumbs[15]);
+
+	if (n > RAMDUMP_NUM_SECTIONS)
+		n = RAMDUMP_NUM_SECTIONS;
+
+	for (i = 0; i < n; i++) {
+		const struct aoc_section_header *sec = &hdr->sections[i];
+
+		dev_info(dev,
+			 "coredump[%2u] %-16.16s type %u core %u flags %#x offset %#x size %#x vma %#x lma %#x\n",
+			 i, sec->name, sec->type, sec->core, sec->flags,
+			 sec->offset, sec->size, sec->vma, sec->lma);
+	}
+
+	/*
+	 * FF1's registers, if the firmware populated them. Sixteen words is
+	 * enough to cover the general-purpose file plus PC and LR on this core.
+	 */
+	{
+		const struct aoc_section_header *sec =
+			&hdr->sections[RAMDUMP_SECTION_F1_REGISTER_INDEX];
+
+		if (sec->type == SECTION_TYPE_CPU_REGISTER &&
+		    (sec->flags & RAMDUMP_FLAG_VALID) && sec->size >= 16 * sizeof(u32)) {
+			const u32 *r = (const u32 *)((const u8 *)hdr + sec->offset);
+
+			dev_info(dev, "coredump: FF1 regs %08x %08x %08x %08x %08x %08x %08x %08x\n",
+				 r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+			dev_info(dev, "coredump: FF1 regs %08x %08x %08x %08x %08x %08x %08x %08x\n",
+				 r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
+		} else {
+			dev_info(dev, "coredump: FF1 register section not populated (type %u flags %#x size %#x)\n",
+				 sec->type, sec->flags, sec->size);
+		}
+	}
+}
+
 static void aoc_watchdog(struct work_struct *work)
 {
 	struct aoc_prvdata *prvdata =
@@ -2069,7 +2256,48 @@ static void aoc_watchdog(struct work_struct *work)
 	struct aoc_section_header *crash_info_section;
 
 	if (aoc_ignore_watchdog) {
-		dev_warn(prvdata->dev, "watchdog ignored by module parameter\n");
+		/*
+		 * Report why AoC died before standing down.
+		 *
+		 * Returning straight away keeps AoC and its control block
+		 * intact, which is the point of the parameter, but it also
+		 * threw away the one thing the firmware does tell us. The
+		 * crash reason is a plain string in the coredump header and
+		 * reading it changes nothing.
+		 */
+		/*
+		 * Only when it changes. Every ALSA command timeout asks for a
+		 * reset, which schedules this work, so a single alsamixer run
+		 * would otherwise repeat the same two lines thirty times.
+		 */
+		if (memcmp(ramdump_header, RAMDUMP_MAGIC,
+			   sizeof(RAMDUMP_MAGIC)) == 0 &&
+		    ramdump_header->valid == 1) {
+			const struct aoc_section_header *sec =
+				&ramdump_header->sections[RAMDUMP_SECTION_CRASH_INFO_INDEX];
+
+			const char *reason = "no valid crash info";
+
+			if (sec->type == SECTION_TYPE_CRASH_INFO &&
+			    sec->flags & RAMDUMP_FLAG_VALID)
+				reason = (const char *)ramdump_header + sec->offset;
+
+			if (strncmp(aoc_last_crash_reason, reason, sizeof(aoc_last_crash_reason))) {
+				strscpy(aoc_last_crash_reason, reason, sizeof(aoc_last_crash_reason));
+				dev_warn(prvdata->dev,
+					 "watchdog ignored by module parameter, crash reason [%s], breadcrumbs %08x %08x\n",
+					 reason, ramdump_header->breadcrumbs[0],
+					 ramdump_header->breadcrumbs[1]);
+
+				aoc_dump_ramdump_sections(prvdata, ramdump_header);
+				aoc_dump_crash_info(prvdata, ramdump_header, sec);
+			}
+		} else if (aoc_last_crash_reason[0]) {
+			aoc_last_crash_reason[0] = 0;
+			dev_warn(prvdata->dev,
+				 "watchdog ignored by module parameter, no coredump header\n");
+		}
+
 		wakeup_source_unregister(ws);
 		return;
 	}
@@ -2770,9 +2998,34 @@ static struct dma_heap *aoc_create_dma_buf_heap(struct aoc_prvdata *prvdata, con
 	return heap;
 }
 
+/*
+ * dma-heaps outlive the driver binding: mainline exports dma_heap_add() and no
+ * counterpart, so the three heaps below cannot be removed once registered.
+ * A re-probe after unbind therefore hit -EEXIST on the very first name, and
+ * aoc_create_dma_buf_heaps() returned false before assigning the playback and
+ * capture bases -- AoC was then handed PlaybackHeapAddress = 0.
+ *
+ * Create them once per module load and hand back the same addresses on every
+ * later probe. The carveout is fixed in the device tree, so they never move.
+ */
+static struct dma_heap *aoc_heap_sensor, *aoc_heap_playback, *aoc_heap_capture;
+static phys_addr_t aoc_heap_sensor_base, aoc_heap_playback_base, aoc_heap_capture_base;
+static bool aoc_heaps_created;
+
 bool aoc_create_dma_buf_heaps(struct aoc_prvdata *prvdata)
 {
 	phys_addr_t base = prvdata->dram_resource.start + resource_size(&prvdata->dram_resource);
+
+	if (aoc_heaps_created) {
+		prvdata->sensor_heap = aoc_heap_sensor;
+		prvdata->audio_playback_heap = aoc_heap_playback;
+		prvdata->audio_capture_heap = aoc_heap_capture;
+		prvdata->sensor_heap_base = aoc_heap_sensor_base;
+		prvdata->audio_playback_heap_base = aoc_heap_playback_base;
+		prvdata->audio_capture_heap_base = aoc_heap_capture_base;
+		dev_info(prvdata->dev, "reusing dma_buf heaps from the first probe\n");
+		return true;
+	}
 
 	if (resource_size(&prvdata->dram_resource) < SENSOR_DIRECT_HEAP_SIZE +
 			PLAYBACK_HEAP_SIZE + CAPTURE_HEAP_SIZE)
@@ -2798,6 +3051,30 @@ bool aoc_create_dma_buf_heaps(struct aoc_prvdata *prvdata)
 	prvdata->audio_capture_heap_base = base;
 	if (IS_ERR(prvdata->audio_capture_heap))
 		return false;
+
+	aoc_heap_sensor = prvdata->sensor_heap;
+	aoc_heap_playback = prvdata->audio_playback_heap;
+	aoc_heap_capture = prvdata->audio_capture_heap;
+	aoc_heap_sensor_base = prvdata->sensor_heap_base;
+	aoc_heap_playback_base = prvdata->audio_playback_heap_base;
+	aoc_heap_capture_base = prvdata->audio_capture_heap_base;
+	aoc_heaps_created = true;
+
+	/*
+	 * These three heaps are now permanent. dma_heap_add() has no
+	 * counterpart in mainline and no lookup by name, while heap->ops points
+	 * into this module's text and dma_heap_fops.owner refers to dma-heap,
+	 * not to us -- so nothing holds a reference on this module across an
+	 * open of /dev/dma_heap/sensor_direct_heap.
+	 *
+	 * Unloading the module therefore leaves three device nodes that look
+	 * ordinary and call into freed memory. Use unbind/bind on 19000000.aoc
+	 * to restart AoC; do not rmmod aoc_core once this point is reached.
+	 * Fixing it properly means giving mainline's dma-heap a removal path
+	 * and an owner reference, which is upstream work, not a local patch.
+	 */
+	dev_warn(prvdata->dev,
+		 "dma_buf heaps registered permanently; rmmod would leave stale /dev/dma_heap nodes -- use unbind/bind\n");
 
 	return true;
 }
@@ -3185,17 +3462,27 @@ err_platform_not_null:
 static void aoc_platform_remove(struct platform_device *pdev)
 {
 	struct aoc_prvdata *prvdata;
-	int i;
 
 	pr_debug("platform_remove\n");
 
 	prvdata = platform_get_drvdata(pdev);
 	acpm_ipc_release_channel(pdev->dev.of_node, prvdata->acpm_async_id);
-	for (i = 0; i < prvdata->sensor_power_count; i++) {
-		if (prvdata->sensor_regulator[i]) {
-			regulator_put(prvdata->sensor_regulator[i]);
-		}
-	}
+
+	/*
+	 * Both rail sets come from devm_regulator_get_exclusive(), so devres
+	 * releases them when the driver detaches. Putting the sensor rails
+	 * here as well destroyed each regulator twice and oopsed inside
+	 * debugfs_remove() on the second pass, on an unbind that had already
+	 * warned twice from _regulator_put() -- the rails were still enabled,
+	 * and the documented order is disable before release.
+	 *
+	 * So turn them off and leave the put to devres. Note this is
+	 * configure_sensor_regulator(), not reset_sensor_power(), which
+	 * disables and then switches straight back on.
+	 */
+	configure_dmic_regulator(prvdata, false);
+	configure_sensor_regulator(prvdata, false);
+
 	sysfs_remove_groups(&pdev->dev.kobj, aoc_groups);
 
 	aoc_cleanup_resources(pdev);

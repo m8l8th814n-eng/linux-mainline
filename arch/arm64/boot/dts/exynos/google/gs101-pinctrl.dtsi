@@ -972,6 +972,16 @@
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
 	};
+
+	/*
+	 * Display vsync lines routed to AoC. The AoC firmware samples these
+	 * to align its own timing with the panel; without the mux they stay
+	 * plain GPIOs and AoC sees nothing.
+	 */
+	aoc_vsync_pins: aoc-vsync-pins {
+		samsung,pins = "gpp3-1", "gpp5-1", "gpp7-1", "gpp9-1";
+		samsung,pin-function = <GS101_PIN_FUNC_2>;
+	};
 };
 
 &pinctrl_peric1 {

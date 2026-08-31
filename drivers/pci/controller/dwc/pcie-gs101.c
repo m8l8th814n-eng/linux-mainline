@@ -150,6 +150,13 @@ static void gs101_pcie_stop_link(struct dw_pcie *pci)
 	gs101_elbi_write(pcie, LTSSM_DISABLE, PCIE_APP_LTSSM_ENABLE);
 }
 
+/*
+ * Shadow (write-only) copies of the root port's BAR sizing masks, in the DWC
+ * DBI region. Zeroing a mask removes the BAR from the address map entirely.
+ */
+#define PCIE_RC_BAR0_MASK	0x100010
+#define PCIE_RC_ROM_BAR_MASK	0x100030
+
 static int gs101_pcie_host_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
@@ -199,6 +206,30 @@ static int gs101_pcie_host_init(struct dw_pcie_rp *pp)
 	val = gs101_elbi_read(pcie, PCIE_IRQ2_EN);
 	val |= IRQ_MSI_CTRL_EN_RISING_EDG;
 	gs101_elbi_write(pcie, val, PCIE_IRQ2_EN);
+
+	/*
+	 * Take the root port's own BARs out of the memory window on the modem
+	 * channel.
+	 *
+	 * dw_pcie_setup_rc() clears PCI_BASE_ADDRESS_0, but that only clears
+	 * the address: the size still comes from the shadow mask register, so
+	 * the kernel sizes the BAR, finds a 1 MB decoder, and allocates it at
+	 * the bottom of the outbound window. The expansion ROM does the same
+	 * with a further 64 kB. The child window is then pushed from
+	 * 0x40000000 up to 0x40200000, and the modem doorbell -- which cpif
+	 * places at window_base + 0x60000 -- lands on 0x40260000 instead of
+	 * the 0x40060000 that "pci_db_addr" in the device tree asks for.
+	 *
+	 * Only channel 0 (HSI1, the modem) is touched, matching the vendor's
+	 * EP_SAMSUNG_MODEM condition in pcie-exynos-rc.c. Channel 1 carries
+	 * the wifi dongle, which works with its root port BAR in place.
+	 */
+	if (pcie->ch_num == 0) {
+		dw_pcie_dbi_ro_wr_en(pci);
+		dw_pcie_writel_dbi(pci, PCIE_RC_BAR0_MASK, 0);
+		dw_pcie_writel_dbi(pci, PCIE_RC_ROM_BAR_MASK, 0);
+		dw_pcie_dbi_ro_wr_dis(pci);
+	}
 
 	return 0;
 

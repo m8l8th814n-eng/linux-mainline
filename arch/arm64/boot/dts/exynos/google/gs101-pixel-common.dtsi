@@ -1129,7 +1129,17 @@
 		pinctrl-0 = <&cs35l41_l_irq>, <&cs35l41_l_rst>;
 
 		interrupt-parent = <&gpa6>;
-		interrupts = <3 IRQ_TYPE_LEVEL_LOW>;
+		/*
+		 * IRQ_TYPE_NONE, not LEVEL_LOW. The cs35l41 driver sets the
+		 * trigger polarity itself from the GPIO2 config (irq_pol =
+		 * IRQF_TRIGGER_LOW in cs35l41_gpio_config). Pinning a concrete
+		 * type here makes the fwspec mapping fail with "type mismatch,
+		 * failed to map hwirq-3" when the module is (re)loaded after boot
+		 * -- the type is not cleaned up on free_irq, so the second map
+		 * conflicts and spi->irq becomes 0 (request_irq(0) -> -EINVAL).
+		 * The vendor uses type 0 here for the same reason.
+		 */
+		interrupts = <3 IRQ_TYPE_NONE>;
 		reset-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
 
 		VA-supply = <&s2mpg11_bucka>;
@@ -1167,13 +1177,14 @@
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";
 		spi-max-frequency = <25000000>;
-		sound-name-prefix = "R";
+		/* "R" prefix now comes from the aoc codec_cfg node, not here. */
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&cs35l41_r_irq>, <&cs35l41_r_rst>;
 
 		interrupt-parent = <&gpa9>;
-		interrupts = <6 IRQ_TYPE_LEVEL_LOW>;
+		/* IRQ_TYPE_NONE: driver sets polarity; see cs35l41_l above. */
+		interrupts = <6 IRQ_TYPE_NONE>;
 		reset-gpios = <&gpp23 7 GPIO_ACTIVE_HIGH>;
 
 		VA-supply = <&s2mpg11_bucka>;
@@ -1232,6 +1243,21 @@
 				in_mul = <1>;
 				out_mul = <1>;
 			};
+		};
+	};
+
+	/*
+	 * Give the right cs35l41 the "R" name-prefix via the aoc card's
+	 * codec_conf path (aoc_of_parse_codec_conf reads of_node + prefix).
+	 * Resolves "can't find codec cfg node". The left amp stays default,
+	 * matching the tune files (cs35l41-dsp1-spk-*-oriole for left,
+	 * R-cs35l41-dsp1-spk-* for right). sound-name-prefix on cs35l41_r is
+	 * removed so the prefix is not applied twice ("RR").
+	 */
+	codec_cfg {
+		cs35l41_r_cfg {
+			of_node = <&cs35l41_r>;
+			prefix = "R";
 		};
 	};
 };
@@ -1335,3 +1361,14 @@
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 	};
 };
+
+/*
+ * BCM4389 WLAN on PCIe HSI2 (channel 1): powered by the always-on
+ * wlan_pwrseq regulator (vpcie-supply on pcie1 in gs101.dtsi). No bcmdhd
+ * DT node on purpose -- with one, bcmdhd owns wl_reg_on and runs its
+ * power-cycle recovery (secondary bus reset), which on this mainline setup
+ * knocks the endpoint off the bus (VID 0xffffffff) and never recovers.
+ * Without a node bcmdhd assumes an always-on regulator and brings the
+ * already-enumerated endpoint up cleanly -- the state that works on cold
+ * boot. (This is why adding a node for kexec survival regressed cold boot.)
+ */

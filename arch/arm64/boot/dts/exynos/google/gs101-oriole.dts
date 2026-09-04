@@ -88,3 +88,68 @@
 	aoc-board-id = <0x20302>;
 	aoc-board-rev = <0x10000>;
 };
+
+/*
+ * Trusty (secure world) — stock Trusty is resident behind ABL and answers
+ * SMCs (trusty_probe: api v5, "Project: slider"). Normal-world SMC transport
+ * node so the ported google-modules/trusty driver can reach it.
+ */
+/ {
+	trusty: trusty {
+		compatible = "android,trusty-smc-v1";
+
+		irq {
+			compatible = "android,trusty-irq-v1";
+			ipi-range = <8 15 8>;
+		};
+
+		log {
+			compatible = "android,trusty-log-v1";
+		};
+
+		virtio {
+			compatible = "android,trusty-virtio-v1";
+		};
+	};
+};
+
+/*
+ * GSC / Titan-M2 (google,gsc) on spi_10. Ported google-modules gsc-spi driver
+ * (creates /dev/gsc0 for libnos/citadel_updater: TPM datagram + GSA nos-call).
+ * Titan-M2 = Nugget OS on RISC-V (Ibex). Reset/IRQ via Citadel GPIOs (ctdl_*).
+ */
+&pinctrl_gpio_alive {
+	ap_gsc_irq: ap_gsc_irq {
+		samsung,pins = "gpa4-1";
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+};
+
+&usi10 {
+	samsung,mode = <USI_MODE_SPI>;
+	status = "okay";
+};
+
+&spi_10 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi10_bus &spi10_cs_func>;
+
+	gsc@0 {
+		compatible = "google,gsc";
+		reg = <0>;
+		spi-max-frequency = <1200000>;
+		gsc,ctdl_ap_irq = <&gpa9 1 0>;
+		gsc,ctdl_rst = <&gpa4 2 0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ap_gsc_irq>;
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+			samsung,spi-chip-select-mode = <0>;
+		};
+	};
+};

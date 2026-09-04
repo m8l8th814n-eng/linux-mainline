@@ -14,6 +14,10 @@ ccflags-y	+= -I$(srctree)/vendor-stub-include
 # gs101 is the only target here.
 ccflags-y	+= -DCONFIG_SOC_GS101=1
 
+# aoc.c calls the resident Trusty hwmgr (com.android.trusty.gsa.hwmgr.aoc) to
+# program AoC SSMT before FF1 release; pull in the ported trusty ipc headers.
+ccflags-y	+= -I$(srctree)/trusty/include
+
 obj-$(CONFIG_WC_MBOX)			+= mailbox-wc.o
 
 obj-$(CONFIG_AOC_DRIVER)		+= aoc_core.o

@@ -112,7 +112,7 @@ struct mbox_controller {
  * REVISIT: If too many platforms see the "Try increasing MBOX_TX_QUEUE_LEN"
  * print, it needs to be taken from config option or somesuch.
  */
-#define MBOX_TX_QUEUE_LEN	31
+#define MBOX_TX_QUEUE_LEN	128	/* was 31; AoC wc-mbox floods it, vendor uses 128 pending */
 
 /**
  * struct mbox_chan - s/w representation of a communication chan

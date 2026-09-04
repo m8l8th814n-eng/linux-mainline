@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-2.0
+subdir-ccflags-y += -I$(M)/include/uapi -DCONFIG_GSC=1
+obj-y += drivers/misc/

@@ -41,6 +41,8 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/completion.h>
+#include <linux/trusty/trusty_ipc.h>
 #include <linux/uaccess.h>
 #include <linux/uio.h>
 #include <linux/wait.h>
@@ -61,7 +63,14 @@
 #define AOC_MAX_MINOR (1U)
 
 #define AOC_FWDATA_ENTRIES 10
-#define AOC_FWDATA_BOARDID_DFL  0x20202
+/*
+ * Default is oriole (0x20302), not raven (0x20202). This is a single-device
+ * oriole port, and fw_data[] captures board_id from this default before
+ * aoc_board_config_parse() runs (the array is built above that call), so the
+ * default is what actually reaches the firmware. Keeping raven here would ship
+ * raven's board id to an oriole regardless of the correct value in the DT.
+ */
+#define AOC_FWDATA_BOARDID_DFL  0x20302
 #define AOC_FWDATA_BOARDREV_DFL 0x10000
 
 #define MAX_RESET_REASON_STRING_LEN 128UL
@@ -272,6 +281,9 @@ static int aoc_bus_probe(struct device *dev);
 static void aoc_bus_remove(struct device *dev);
 
 static void aoc_configure_iommu(struct aoc_prvdata *p, const struct firmware *fw);
+static int aoc_iommu_fault_handler(struct iommu_domain *domain,
+				   struct device *dev, unsigned long iova,
+				   int flags, void *token);
 
 static struct bus_type aoc_bus_type = {
 	.name = "aoc",
@@ -687,6 +699,129 @@ err_alloc:
 	return rc;
 }
 
+/*
+ * Program the AoC SSMT (Stream Security Mapping Table) via the resident Trusty
+ * hwmgr service (com.android.trusty.gsa.hwmgr.aoc), in the window after
+ * GSA_AOC_START (mailbox state 4) and before RELEASE_RESET runs FF1. The
+ * mainline GSA path does not perform this secure setup, so FF1's SPEECH task
+ * faults at PC=0 without it. Request = {cmd=1, subcmd=1}; reply = {0x80000001,
+ * status} (status 0 = ok, -31 = AoC not in a state to program). Requires the
+ * ported trusty-ipc stack up before aoc (guaranteed by the module load order).
+ */
+/*
+ * aoc_hwmgr_ssmt: when/how to program AoC SSMT via Trusty hwmgr.aoc.
+ *   0 = off
+ *   1 = before GSA_AOC_START   (AoC in LOADED state 1; default)
+ *   2 = after  GSA_AOC_START   (state 4; observed to return -31)
+ *   3 = before START AND skip GSA_AOC_START (let hwmgr do the start, keep RELEASE)
+ * Runtime-tunable (0644): echo N > /sys/module/aoc_core/parameters/aoc_hwmgr_ssmt
+ * then unbind/bind 19000000.aoc to re-run the bringup -- no rebuild/reboot needed.
+ */
+static int aoc_hwmgr_ssmt = 1;
+
+/* aoc_disable_mm: DisableMM passed to FF1 at fw-start. 0 = Monitor Mode ON
+ * (the always-on "Hey Google" hotword pipeline / FF1 mainTask's normal loop).
+ * SPEECH_INIT no longer faults now that SSMT is programmed, so default hotword
+ * ON. Runtime-tunable (0644) + AOC_IOCTL_DISABLE_MM still works. */
+static int aoc_disable_mm;
+module_param(aoc_disable_mm, int, 0644);
+MODULE_PARM_DESC(aoc_disable_mm,
+		 "FF1 DisableMM at bringup: 0=Monitor Mode/hotword ON (default), 1=off");
+module_param(aoc_hwmgr_ssmt, int, 0644);
+MODULE_PARM_DESC(aoc_hwmgr_ssmt,
+		 "AoC SSMT via Trusty hwmgr.aoc: 0=off 1=before-START 2=after-START 3=replace-START");
+
+struct aoc_ssmt_ctx {
+	struct completion connected;
+	struct completion replied;
+	int status;
+};
+
+static void aoc_ssmt_handle_event(void *arg, int event)
+{
+	struct aoc_ssmt_ctx *c = arg;
+
+	if (event == TIPC_CHANNEL_CONNECTED)
+		complete(&c->connected);
+}
+
+static struct tipc_msg_buf *aoc_ssmt_handle_msg(void *arg,
+						struct tipc_msg_buf *mb)
+{
+	struct aoc_ssmt_ctx *c = arg;
+
+	if (mb->wpos - mb->rpos >= 2 * sizeof(u32)) {
+		u32 *r = (u32 *)((u8 *)mb->buf_va + mb->rpos);
+
+		c->status = (int)r[1];
+	}
+	complete(&c->replied);
+	return mb;
+}
+
+static const struct tipc_chan_ops aoc_ssmt_ops = {
+	.handle_event = aoc_ssmt_handle_event,
+	.handle_msg = aoc_ssmt_handle_msg,
+};
+
+static int aoc_hwmgr_ssmt_setup(struct aoc_prvdata *prvdata)
+{
+	struct aoc_ssmt_ctx ctx;
+	struct tipc_chan *chan;
+	struct tipc_msg_buf *txbuf;
+	u32 *req;
+	int ret;
+
+	init_completion(&ctx.connected);
+	init_completion(&ctx.replied);
+	ctx.status = -EIO;
+
+	chan = tipc_create_channel(NULL, &aoc_ssmt_ops, &ctx);
+	if (IS_ERR(chan)) {
+		dev_warn(prvdata->dev, "SSMT: tipc channel create failed: %ld\n",
+			 PTR_ERR(chan));
+		return PTR_ERR(chan);
+	}
+
+	ret = tipc_chan_connect(chan, "com.android.trusty.gsa.hwmgr.aoc");
+	if (ret) {
+		dev_warn(prvdata->dev, "SSMT: connect failed: %d\n", ret);
+		goto out;
+	}
+	if (!wait_for_completion_timeout(&ctx.connected,
+					 msecs_to_jiffies(1000))) {
+		dev_warn(prvdata->dev, "SSMT: connect timeout\n");
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+
+	txbuf = tipc_chan_get_txbuf_timeout(chan, msecs_to_jiffies(1000));
+	if (IS_ERR(txbuf)) {
+		ret = PTR_ERR(txbuf);
+		goto out;
+	}
+	req = mb_put_data(txbuf, 2 * sizeof(u32));
+	req[0] = 1;	/* cmd = 1 */
+	req[1] = 1;	/* subcmd = 1: program SSMT for AoC */
+	ret = tipc_chan_queue_msg(chan, txbuf);
+	if (ret) {
+		tipc_chan_put_txbuf(chan, txbuf);
+		goto out;
+	}
+	if (!wait_for_completion_timeout(&ctx.replied,
+					 msecs_to_jiffies(1000))) {
+		dev_warn(prvdata->dev, "SSMT: reply timeout\n");
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+	ret = ctx.status;
+	dev_info(prvdata->dev, "SSMT: hwmgr.aoc setup status=%d\n", ret);
+out:
+	tipc_chan_shutdown(chan);
+	tipc_chan_destroy(chan);
+	return ret;
+}
+
 static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 {
 	static bool first_load_prevented = false;
@@ -893,6 +1028,10 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	if (gsa_enabled) {
 		int rc;
 
+		if (prvdata->domain)
+			iommu_set_fault_handler(prvdata->domain,
+						aoc_iommu_fault_handler, dev);
+
 		/*
 		 * Required here, even though the vendor calls it only in the
 		 * non-GSA branch.
@@ -969,9 +1108,24 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	disable_power_mode(0, POWERMODE_TYPE_SYSTEM);
 	prvdata->ipc_base = aoc_dram_translate(prvdata, ipc_offset);
 
+	/*
+	 * Program AoC SSMT via Trusty hwmgr.aoc while AoC is still in the LOADED
+	 * state (mailbox state 1). The hwmgr cmd={1,1} handler only programs SSMT
+	 * when it sees state==1; doing it after GSA_AOC_START (state 4) returns
+	 * -31 and FF1 then faults at PC=0. Must run before the start sequence.
+	 */
+	if (aoc_hwmgr_ssmt == 1 || aoc_hwmgr_ssmt == 3)
+		aoc_hwmgr_ssmt_setup(prvdata);
+
 	/* start AOC */
 	if (gsa_enabled) {
-		int rc = gsa_send_aoc_cmd(prvdata->gsa_dev, GSA_AOC_START);
+		int rc = 0;
+
+		if (aoc_hwmgr_ssmt != 3)
+			rc = gsa_send_aoc_cmd(prvdata->gsa_dev, GSA_AOC_START);
+
+		if (aoc_hwmgr_ssmt == 2 && rc >= 0)
+			aoc_hwmgr_ssmt_setup(prvdata);
 
 		/*
 		 * Both commands are needed on this path. START alone does not
@@ -1592,6 +1746,26 @@ static struct aoc_service_dev *create_service_device(struct aoc_prvdata *prvdata
 	return dev;
 }
 
+
+/*
+ * Report SysMMU faults instead of letting them pass silently.
+ *
+ * The vendor registers this in the GSA branch with
+ * register_device_fault_handler(); that API and the rich struct iommu_fault it
+ * fed are gone in mainline, so this is the 7.2 equivalent: an
+ * iommu_fault_handler_t set on AoC's domain, matching how msm_iommu.c does it.
+ *
+ * It cannot stop AoC dying in SPEECH_INIT. What it can do is make a translation
+ * fault during bring-up visible -- if FF1's death is a SysMMU fault on a region
+ * the firmware expects mapped, this is the line that would finally print it.
+ */
+static int aoc_iommu_fault_handler(struct iommu_domain *domain,
+				   struct device *dev, unsigned long iova,
+				   int flags, void *token)
+{
+	dev_err(dev, "aoc iommu fault: iova=%#lx flags=%#x\n", iova, flags);
+	return 0;
+}
 
 static void aoc_configure_iommu(struct aoc_prvdata *p, const struct firmware *fw)
 {
@@ -3201,7 +3375,16 @@ static int aoc_platform_probe(struct platform_device *pdev)
 	}
 
 	prvdata->dev = dev;
-	prvdata->disable_monitor_mode = 0;
+	/*
+	 * TEST: default Monitor Mode OFF (kAOCDisableMM=1 passed at fw-start).
+	 * Monitor Mode is the always-on "Hey Google" hotword pipeline on FF1;
+	 * it faults in SPEECH_IN (PC=0) during bring-up and blocks the whole AoC
+	 * init ("aoc init no respond, try restart"). On Android a userspace
+	 * service sets this via AOC_IOCTL_DISABLE_MM; on pmOS nothing does, so we
+	 * default it on to see if skipping hotword lets A32 reach online and the
+	 * speaker playback path come up. Revert to 0 once MM/hotword is wanted.
+	 */
+	prvdata->disable_monitor_mode = aoc_disable_mm;
 	prvdata->enable_uart_tx = 0;
 	prvdata->force_voltage_nominal = 0;
 	prvdata->no_ap_resets = 0;

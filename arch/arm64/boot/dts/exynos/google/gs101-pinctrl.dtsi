@@ -484,6 +484,14 @@
 		#gpio-cells = <2>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
+
+		/* BT device-wakeup, held asserted alongside bt_reg_on. */
+		bt-dev-wake-hog {
+			gpio-hog;
+			gpios = <3 0>;
+			output-high;
+			line-name = "bt_dev_wake";
+		};
 	};
 
 	gpp15: gpp15-gpio-bank {
@@ -498,6 +506,19 @@
 		#gpio-cells = <2>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
+
+		/*
+		 * BT_REG_ON. No serdev driver owns the BCM4389 BT side (see
+		 * serial_16 in gs101.dtsi), so hold the chip powered here for
+		 * userspace HCI probing. Drop this hog when a real BT driver
+		 * takes the line back.
+		 */
+		bt-reg-on-hog {
+			gpio-hog;
+			gpios = <2 0>;
+			output-high;
+			line-name = "bt_reg_on";
+		};
 	};
 
 	gpp17: gpp17-gpio-bank {

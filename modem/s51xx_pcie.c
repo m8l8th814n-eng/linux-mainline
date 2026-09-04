@@ -419,6 +419,17 @@ static int s51xx_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *en
 	for (i = 0; i < 6; i++) {
 		pdev->resource[i].start = 0x0;
 		pdev->resource[i].end = 0x0;
+
+		/*
+		 * The CP implements BAR0 only, and BAR0 is 64-bit so it eats
+		 * the BAR1 register pair as well. Asking the core to assign
+		 * address space to the four that do not exist gets one
+		 * "bogus alignment" refusal each, every time the modem boots:
+		 * a resource with no type has no alignment to compute.
+		 */
+		if (!(pdev->resource[i].flags & IORESOURCE_TYPE_BITS))
+			continue;
+
 		if (pci_assign_resource(pdev, i))
 			pr_warn("%s: failed to assign pci resource (i=%d)\n", __func__, i);
 	}

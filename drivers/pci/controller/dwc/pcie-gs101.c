@@ -512,10 +512,10 @@ int exynos_pcie_poweroff(int ch_num)
 EXPORT_SYMBOL_GPL(exynos_pcie_poweroff);
 
 /*
- * Outbound ATU, MSI addressing and the separated MSI vectors are all set up
- * by the DesignWare core here, from the ranges in the device tree. cpif only
- * needs to configure them itself on the vendor stack, where that work is left
- * to the consumer.
+ * The outbound ATU and the separated MSI vectors are set up by the DesignWare
+ * core here, from the ranges in the device tree; cpif only has to do that work
+ * itself on the vendor stack. The MSI target address is not in that category
+ * -- see exynos_pcie_set_msi_ctrl_addr() below.
  */
 int exynos_pcie_rc_set_outbound_atu(int ch_num, u32 target_addr, u32 offset,
 				    u32 size)
@@ -524,8 +524,34 @@ int exynos_pcie_rc_set_outbound_atu(int ch_num, u32 target_addr, u32 offset,
 }
 EXPORT_SYMBOL_GPL(exynos_pcie_rc_set_outbound_atu);
 
+/*
+ * Point the internal MSI receiver at the address the CP was given.
+ *
+ * dw_pcie_msi_host_init() allocates a page of its own and leaves its address
+ * in pp->msi_data, which is what the iMSI-RX decodes writes to. The modem does
+ * not know about that page: cp_shmem hands the CP the reserved region at
+ * cp_msi_rmem@f6200000 as its MSI base, and that is where it writes. With the
+ * two pointing at different addresses the endpoint's MSIs are never decoded --
+ * mif_cp2ap_msg and mif_cp2ap_status sat at zero interrupts while the modem
+ * stayed in BOOTING, waiting for a handshake that needs them.
+ *
+ * So take the address cpif passes down and reprogram PCIE_MSI_ADDR_LO/HI with
+ * it, which is what the vendor's pcie-exynos-rc.c does.
+ */
 int exynos_pcie_set_msi_ctrl_addr(int num, u64 msi_ctrl_addr)
 {
+	struct gs101_pcie *pcie = gs101_pcie_get_ch(num);
+	struct dw_pcie_rp *pp;
+
+	if (!pcie)
+		return -ENODEV;
+
+	pp = &pcie->pci.pp;
+	pp->msi_data = (dma_addr_t)msi_ctrl_addr;
+	dw_pcie_msi_init(pp);
+
+	dev_info(pcie->pci.dev, "MSI target address set to %pad\n", &pp->msi_data);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(exynos_pcie_set_msi_ctrl_addr);

@@ -553,7 +553,15 @@
 		 * which requires the memory to be outside System RAM.
 		 */
 		aoc_reserve: aoc@94000000 {
-			reg = <0x0 0x94000000 0x03400000>;
+			/*
+			 * 48 MB (0x3000000), matching the vendor gs101-rmem.dtsi.
+			 * dram_size is passed to the firmware as kAOCCarveoutSize;
+			 * the aoc.bin (polygon build) is built for a 48 MB carveout,
+			 * and the driver carves its dma-buf heaps from base+size, so
+			 * an oversized region shifts those and can throw off the
+			 * firmware's memory layout. Was 0x3400000 (52 MB).
+			 */
+			reg = <0x0 0x94000000 0x03000000>;
 			no-map;
 		};
 
@@ -1826,6 +1834,19 @@
 			max-link-speed = <3>;
 			interrupts = <GIC_SPI 509 IRQ_TYPE_LEVEL_HIGH 0>;
 			interrupt-names = "msi";
+
+			/*
+			 * Legacy INTx routing. Everything behind this port uses
+			 * MSI, but without the map of_irq_parse_pci() has
+			 * nothing to walk and refuses with -EINVAL on every
+			 * bind. The vendor gives HSI2 a map and leaves HSI1
+			 * without one, so the modem port keeps failing there
+			 * too -- that is expected, not a gap.
+			 */
+			#interrupt-cells = <1>;
+			interrupt-map-mask = <0 0 0 0>;
+			interrupt-map = <0 0 0 0 &gic GIC_SPI 509
+					 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_DBI_ACLK_UG>,
 				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_MSTR_ACLK_UG>,
 				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_SLV_ACLK_UG>,
@@ -2282,13 +2303,20 @@
 				pinctrl-0 = <&uart16_bus>;
 				status = "okay";
 
-				bluetooth {
-					compatible = "brcm,bcm4349-bt";
-					shutdown-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
-					device-wakeup-gpios = <&gpp14 3 GPIO_ACTIVE_HIGH>;
-					host-wakeup-gpios = <&gpa6 6 GPIO_ACTIVE_HIGH>;
-					max-speed = <3000000>;
-				};
+				/*
+				 * No serdev bluetooth child on purpose. With one,
+				 * hci_uart_bcm claims the port and dies on
+				 * "0xfc18 tx timeout": the BCM4389 HCI init/.hcd
+				 * sequence lives in Android's userspace BT HAL,
+				 * not in any kernel driver we can port. Leaving
+				 * the child out keeps serial_16 a plain tty
+				 * (/dev/ttySAC16) so the init sequence and baud
+				 * rates can be probed from userspace without a
+				 * build per guess. BT_REG_ON and dev-wake are
+				 * held asserted by gpio-hogs below so the chip is
+				 * powered while probing. Restore the child once
+				 * the working init handshake is known.
+				 */
 			};
 		};
 

@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+
+subdir-ccflags-y += -I$(srctree)/$(src)/include -I$(M)/include -DCONFIG_TRUSTY=1 -DCONFIG_TRUSTY_IRQ=1 -DCONFIG_TRUSTY_LOG=1 -DCONFIG_TRUSTY_VIRTIO=1 -DCONFIG_TRUSTY_VIRTIO_IPC=1
+
+obj-y += drivers/trusty/

@@ -469,6 +469,8 @@ static void set_sys_clk(struct snd_soc_dai *dai, u32 bclk, u32 rate,
 	u32 clk;
 
 	sys = find_clk(dai, pdata->sys_clk_num, pdata->sys_clks);
+	pr_info("AUDIODBG set_sys_clk dai=%s sys=%s sys_clk_num=%u\n",
+		dai->name, sys ? "FOUND" : "NULL", pdata->sys_clk_num);
 	if (!sys)
 		return;
 

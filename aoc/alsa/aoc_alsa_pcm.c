@@ -138,6 +138,7 @@ void aoc_timer_stop_sync(struct aoc_alsa_stream *alsa_stream)
 bool aoc_pcm_update_pos(struct aoc_alsa_stream *alsa_stream, unsigned long consumed)
 {
 	unsigned long buffer_cnt;
+	unsigned int adjust_pos = 0;
 
 	/* Update the pcm pointer  */
 	if (unlikely(alsa_stream->n_overflow)) {
@@ -163,6 +164,15 @@ bool aoc_pcm_update_pos(struct aoc_alsa_stream *alsa_stream, unsigned long consu
 					alsa_stream->idx, buffer_cnt, alsa_stream->prev_buffer_cnt,
 					alsa_stream->pos_delta);
 		alsa_stream->prev_buffer_cnt = buffer_cnt;
+	}
+
+	/* Update the pos to a multiple of the period size */
+	if (alsa_stream->pos_delta > alsa_stream->period_size) {
+		adjust_pos = alsa_stream->pos_delta % alsa_stream->period_size;
+		if (adjust_pos) {
+			alsa_stream->pos -= adjust_pos;
+			alsa_stream->prev_consumed -= adjust_pos;
+		}
 	}
 
 	return (alsa_stream->pos_delta >= alsa_stream->period_size) ? true : false;
@@ -569,6 +579,14 @@ static int snd_aoc_pcm_prepare(struct snd_soc_component *component,
 			pr_err("ERR in resetting the DRAM ring buffer writer pointer\n");
 			goto out;
 		}
+		/*
+		 * On mainline the AoC self-init primes the DOWN ring full
+		 * (tx = ring size, rx = 0), so the very first write sees
+		 * avail = 0 and fails with -EFAULT. Sync the reader offset up
+		 * to the writer so the stream starts from an empty ring; FF1
+		 * drains normally once playback is triggered.
+		 */
+		aoc_ring_flush_read_data(alsa_stream->dev->service, AOC_DOWN, 0);
 	}
 
 	alsa_stream->buffer_size = snd_pcm_lib_buffer_bytes(substream);

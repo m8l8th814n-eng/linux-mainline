@@ -1124,6 +1124,8 @@
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";
 		spi-max-frequency = <25000000>;
+		/* Left amp: default (no prefix); vendor sets tuning-has-prefix. */
+		cirrus,tuning-has-prefix;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&cs35l41_l_irq>, <&cs35l41_l_rst>;
@@ -1149,6 +1151,15 @@
 		cirrus,boost-ind-nanohenry = <1000>;
 		cirrus,boost-cap-microfarad = <30>;
 		cirrus,asp-sdout-hiz = <3>;
+		/*
+		 * vendor parity. NOTE: mainline's cs35l41 driver does NOT
+		 * parse hw-noise-gate-select (no-op here, kept for parity).
+		 * cirrus,hibernate-enable is deliberately NOT set: the driver
+		 * now honors it, and the halo DSP mailbox wake fails on gs101,
+		 * which latches runtime_error and storms the IRQ. Add it back
+		 * only once DSP hibernate wake works.
+		 */
+		cirrus,hw-noise-gate-select = <63>;
 
 		/*
 		 * Drive the interrupt out of GPIO2, which is what the
@@ -1168,6 +1179,8 @@
 			 * 25 MHz the vendor runs these amps at.
 			 */
 			samsung,spi-feedback-delay = <1>;
+			/* vendor parity (s3c64xx doesn't parse this) */
+			samsung,spi-chip-select-mode = <1>;
 		};
 	};
 
@@ -1177,7 +1190,12 @@
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";
 		spi-max-frequency = <25000000>;
-		/* "R" prefix now comes from the aoc codec_cfg node, not here. */
+		/*
+		 * "R" prefix comes from the aoc codec_cfg node below (this
+		 * helped on mainline); no sound-name-prefix here, to avoid a
+		 * double "RR". Tuning files carry the prefix; left amp default.
+		 */
+		cirrus,tuning-has-prefix;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&cs35l41_r_irq>, <&cs35l41_r_rst>;
@@ -1194,6 +1212,13 @@
 		cirrus,boost-ind-nanohenry = <1000>;
 		cirrus,boost-cap-microfarad = <30>;
 		cirrus,asp-sdout-hiz = <3>;
+		/*
+		 * vendor parity (mainline driver doesn't parse these two -
+		 * no-ops, kept for parity). hibernate deliberately off; see
+		 * cs35l41_l for why.
+		 */
+		cirrus,hw-noise-gate-select = <63>;
+		cirrus,right-channel-amp;
 
 		/*
 		 * Drive the interrupt out of GPIO2, which is what the
@@ -1207,6 +1232,8 @@
 
 		controller-data {
 			samsung,spi-feedback-delay = <1>;
+			/* vendor: automatic SPI CS */
+			samsung,spi-chip-select-mode = <1>;
 		};
 	};
 };
@@ -1249,10 +1276,10 @@
 	/*
 	 * Give the right cs35l41 the "R" name-prefix via the aoc card's
 	 * codec_conf path (aoc_of_parse_codec_conf reads of_node + prefix).
-	 * Resolves "can't find codec cfg node". The left amp stays default,
-	 * matching the tune files (cs35l41-dsp1-spk-*-oriole for left,
-	 * R-cs35l41-dsp1-spk-* for right). sound-name-prefix on cs35l41_r is
-	 * removed so the prefix is not applied twice ("RR").
+	 * This is what actually applied the prefix on mainline; without it the
+	 * card logs "can't find codec cfg node". sound-name-prefix is NOT set
+	 * on cs35l41_r, so the prefix is applied once (no "RR"). Left amp stays
+	 * default; both carry cirrus,tuning-has-prefix.
 	 */
 	codec_cfg {
 		cs35l41_r_cfg {

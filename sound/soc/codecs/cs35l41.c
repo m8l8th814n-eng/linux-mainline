@@ -1337,6 +1337,14 @@ int cs35l41_probe(struct cs35l41_private *cs35l41, const struct cs35l41_hw_cfg *
 	if (ret < 0)
 		goto err;
 
+	/*
+	 * Opt-in DSP hibernate. Absent by default on gs101 because the halo
+	 * DSP mailbox wake does not respond here and latches runtime_error
+	 * (IRQ storm: "pm_runtime_resume_and_get failed ... -22").
+	 */
+	cs35l41->hibernate_enable =
+		device_property_read_bool(cs35l41->dev, "cirrus,hibernate-enable");
+
 	pm_runtime_set_autosuspend_delay(cs35l41->dev, 3000);
 	pm_runtime_use_autosuspend(cs35l41->dev);
 	pm_runtime_set_active(cs35l41->dev);
@@ -1404,8 +1412,10 @@ static int cs35l41_runtime_suspend(struct device *dev)
 	if (!cs35l41->dsp.preloaded || !cs35l41->dsp.cs_dsp.running)
 		return 0;
 
-	wm_adsp_hibernate(&cs35l41->dsp, true);
-	cs35l41_enter_hibernate(dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type);
+	if (cs35l41->hibernate_enable) {
+		wm_adsp_hibernate(&cs35l41->dsp, true);
+		cs35l41_enter_hibernate(dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type);
+	}
 
 	regcache_cache_only(cs35l41->regmap, true);
 	regcache_mark_dirty(cs35l41->regmap);
@@ -1425,16 +1435,19 @@ static int cs35l41_runtime_resume(struct device *dev)
 
 	regcache_cache_only(cs35l41->regmap, false);
 
-	ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
-	if (ret)
-		return ret;
+	if (cs35l41->hibernate_enable) {
+		ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
+		if (ret)
+			return ret;
+	}
 
 	/* Test key needs to be unlocked to allow the OTP settings to re-apply */
 	cs35l41_test_key_unlock(cs35l41->dev, cs35l41->regmap);
 	ret = regcache_sync(cs35l41->regmap);
 	cs35l41_test_key_lock(cs35l41->dev, cs35l41->regmap);
 
-	wm_adsp_hibernate(&cs35l41->dsp, false);
+	if (cs35l41->hibernate_enable)
+		wm_adsp_hibernate(&cs35l41->dsp, false);
 
 	if (ret) {
 		dev_err(cs35l41->dev, "Failed to restore register cache: %d\n", ret);

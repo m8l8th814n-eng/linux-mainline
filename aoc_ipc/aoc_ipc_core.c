@@ -589,6 +589,18 @@ bool aoc_ring_reset_write_pointer(aoc_service *service, aoc_direction dir)
 	s = service;
 	r = &s->regions[dir];
 
+	/*
+	 * An empty ring (tx == rx) has no partial period to flush.  This
+	 * function pads to the ring boundary via bytes_remaining = sz - wp,
+	 * which on a fresh mainline ring (wp == 0) advances tx by the whole
+	 * ring size and makes it look full -- the first write then fails with
+	 * -EFAULT ("inconsistent write/read pointers, avail = 0").  On real
+	 * hardware wp is never 0 here because AoC keeps the writer mid-ring;
+	 * guard the empty case so a fresh/drained ring is left empty.
+	 */
+	if (ioread32(&r->tx) == ioread32(&r->rx))
+		return true;
+
 	sz = ioread32(&r->size);
 	wp = ioread32(&r->wp);
 	bytes_remaining = sz - wp;

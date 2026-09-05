@@ -33,6 +33,13 @@ struct cs35l41_private {
 	int irq;
 	/* GPIO for /RST */
 	struct gpio_desc *reset_gpio;
+	/*
+	 * Opt-in DSP hibernate (cirrus,hibernate-enable). Off by default:
+	 * the halo DSP mailbox wake (cs35l41_exit_hibernate) does not respond
+	 * in the gs101/AoC setup, which latches runtime_error and storms the
+	 * IRQ with "pm_runtime_resume_and_get failed ... -22".
+	 */
+	bool hibernate_enable;
 };
 
 int cs35l41_probe(struct cs35l41_private *cs35l41, const struct cs35l41_hw_cfg *hw_cfg);

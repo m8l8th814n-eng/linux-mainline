@@ -362,6 +362,9 @@ struct aoc_alsa_stream {
 	int pcm_format_width; /* Number of bits */
 	bool pcm_float_fmt; /* Floating point */
 	bool reused_for_voip;
+	/* DOWN ring is (re)primed full by AoC after BE prepare; flush it on the
+	 * first write so the first period does not fail with -EFAULT/avail=0. */
+	bool ring_flush_pending;
 
 	struct vm_area_struct *vma; /* for MMAP */
 	unsigned int period_size;

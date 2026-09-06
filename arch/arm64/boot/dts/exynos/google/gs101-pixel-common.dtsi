@@ -1119,7 +1119,7 @@
 	num-cs = <2>;
 
 	cs35l41_l: speaker-amp@0 {
-		compatible = "cirrus,cs35l41";
+		compatible = "cirrus,cs35l41dna";
 		reg = <0>;
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";
@@ -1185,7 +1185,7 @@
 	};
 
 	cs35l41_r: speaker-amp@1 {
-		compatible = "cirrus,cs35l41";
+		compatible = "cirrus,cs35l41dna";
 		reg = <1>;
 		#sound-dai-cells = <1>;
 		cirrus,subsystem-id = "oriole";

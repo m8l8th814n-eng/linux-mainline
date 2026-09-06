@@ -581,12 +581,14 @@ static int snd_aoc_pcm_prepare(struct snd_soc_component *component,
 		}
 		/*
 		 * On mainline the AoC self-init primes the DOWN ring full
-		 * (tx = ring size, rx = 0), so the very first write sees
-		 * avail = 0 and fails with -EFAULT. Sync the reader offset up
-		 * to the writer so the stream starts from an empty ring; FF1
-		 * drains normally once playback is triggered.
+		 * (tx = ring size, rx = 0), so the first write would see
+		 * avail = 0 and fail with -EFAULT. We cannot empty it here:
+		 * the BE (TDM_0 -> cs35l41) prepare runs after this in DPCM and
+		 * re-primes the ring via an AoC set-params command. Defer the
+		 * one-shot empty to the first write instead (aoc_audio_write),
+		 * which runs after all prepares. FF1 drains normally afterwards.
 		 */
-		aoc_ring_flush_read_data(alsa_stream->dev->service, AOC_DOWN, 0);
+		alsa_stream->ring_flush_pending = true;
 	}
 
 	alsa_stream->buffer_size = snd_pcm_lib_buffer_bytes(substream);

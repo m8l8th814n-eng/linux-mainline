@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Google downstream CS35L41 amplifier driver, ported to mainline 7.2.
+# Built out-of-tree (make M=cs35l41dna) like the other vendor modules
+# (aoc/, trusty/, gsc/). One SPI-only module with a distinct name so it
+# does NOT collide with the in-tree snd_soc_cs35l41 (kept built for its
+# wm_adsp/cs_dsp deps, blacklisted at runtime).
+#
+# Has what mainline upstream lacks: "Main AMP Enable" DAPM switch,
+# "ASPRX* Slot Position" controls, right-channel-amp, and CSPL calibration
+# application -- needed for clean gs101/oriole speaker audio. Links against
+# the KERNEL's wm_adsp/cs_dsp (already =m).
+
+obj-m += snd_soc_cs35l41dna.o
+snd_soc_cs35l41dna-y := cs35l41.o cs35l41-tables.o cs35l41-spi.o
+
+# kernel wm_adsp.h lives in sound/soc/codecs (not exported to include/)
+ccflags-y += -I$(srctree)/sound/soc/codecs
+# our bundled sound/cs35l41-private.h
+ccflags-y += -I$(src)/include

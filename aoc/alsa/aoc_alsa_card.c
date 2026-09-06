@@ -243,9 +243,18 @@ static const struct be_param_cache default_be_params[PORT_MAX] = {
 	MK_BE_PARAMS(I2S_1_TX, SNDRV_PCM_FORMAT_S16_LE, 2, 48000)
 	MK_BE_PARAMS(I2S_2_RX, SNDRV_PCM_FORMAT_S16_LE, 2, 48000)
 	MK_BE_PARAMS(I2S_2_TX, SNDRV_PCM_FORMAT_S16_LE, 2, 48000)
-	MK_TDM_BE_PARAMS(TDM_0_RX, SNDRV_PCM_FORMAT_S16_LE,
+	/*
+	 * TDM_0 to the cs35l41 amps runs 32-bit slots (slot_fmt S32_LE, matching
+	 * the "TDM_0_RX Format=S32_LE" AoC setting). The codec-facing BE format
+	 * here becomes the ASP RX slot width in cs35l41_pcm_hw_params
+	 * (ASP_WIDTH_RX = params_physical_width); S16 there gives a 16-bit RX
+	 * width on a 32-bit bus -> misaligned samples = "broken modem" noise.
+	 * Use S32_LE so the amp clocks 32-bit slots; the S16 audio sits
+	 * MSB-justified and the amp reads it back correctly.
+	 */
+	MK_TDM_BE_PARAMS(TDM_0_RX, SNDRV_PCM_FORMAT_S32_LE,
 			2, 48000, 4, SNDRV_PCM_FORMAT_S32_LE)
-	MK_TDM_BE_PARAMS(TDM_0_TX, SNDRV_PCM_FORMAT_S16_LE,
+	MK_TDM_BE_PARAMS(TDM_0_TX, SNDRV_PCM_FORMAT_S32_LE,
 			2, 48000, 4, SNDRV_PCM_FORMAT_S32_LE)
 	MK_TDM_BE_PARAMS(TDM_1_RX, SNDRV_PCM_FORMAT_S16_LE,
 			2, 48000, 4, SNDRV_PCM_FORMAT_S32_LE)

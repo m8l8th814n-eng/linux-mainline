@@ -3049,7 +3049,45 @@ int aoc_audio_write(struct aoc_alsa_stream *alsa_stream, struct iov_iter *buf,
 	int avail;
 	uint32_t block_size;
 
+	if (alsa_stream->ring_flush_pending) {
+		aoc_ring_flush_read_data(dev->service, AOC_DOWN, 0);
+		alsa_stream->ring_flush_pending = false;
+		/*
+		 * The flush advances the ring read pointer (rx) past the whole
+		 * primed ring in one go, but hw_ptr_base was captured in
+		 * prepare() before this jump. Re-anchor the position tracking to
+		 * the post-flush rx so (consumed - hw_ptr_base) starts from zero
+		 * instead of reporting a one-ring position jump on the first
+		 * hrtimer poll.
+		 */
+		alsa_stream->hw_ptr_base =
+			aoc_ring_bytes_read(dev->service, AOC_DOWN);
+		alsa_stream->prev_consumed = alsa_stream->hw_ptr_base;
+		alsa_stream->pos = 0;
+		alsa_stream->prev_pos = 0;
+		alsa_stream->pos_delta = 0;
+		alsa_stream->prev_buffer_cnt = 0;
+		alsa_stream->n_overflow = 0;
+	}
+
+	/*
+	 * The buffer is capped to one period, so ALSA fires TRIGGER_START (which
+	 * starts the AoC FF1 source and the TDM_0 sink) right after the first
+	 * period is queued. A following write may briefly see a full ring before
+	 * FF1 has drained a period -- wait for space rather than failing.
+	 */
 	avail = aoc_ring_bytes_available_to_write(dev->service, AOC_DOWN);
+	if (avail < count) {
+		int waited_us = 0;
+
+		do {
+			usleep_range(1000, 2000);
+			waited_us += 1500;
+			avail = aoc_ring_bytes_available_to_write(dev->service,
+								  AOC_DOWN);
+		} while (avail < count && waited_us < 200000);
+	}
+
 	if (unlikely(avail < count)) {
 		pr_err("ERR: inconsistent write/read pointers, avail = %d, towrite = %u\n",
 		       avail, count);

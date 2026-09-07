@@ -758,7 +758,7 @@ static int hotword_tap_enable_ctl_get(struct snd_kcontrol *kcontrol,
 
 		return 0;
 	} else {
-		pr_debug("hotword is not supported on this device\n");
+		pr_err("WARN:hotword is not supported on this device\n");
 		return 0;
 	}
 }
@@ -783,7 +783,7 @@ static int hotword_tap_enable_ctl_set(struct snd_kcontrol *kcontrol,
 		return err;
 	}
 	 else {
-		pr_debug("hotword is not supported on this device\n");
+		pr_err("WARN:hotword is not supported on this device\n");
 		return 0;
 	}
 }
@@ -2448,20 +2448,6 @@ static const char *ft_aec_ref_source_texts[NUM_AEC_REF_SOURCE] = { "Default", "S
 								   "BT" };
 static SOC_ENUM_SINGLE_DECL(ft_aec_ref_source_enum, 1, 0, ft_aec_ref_source_texts);
 
-/*
- * "Voice Call Rx Volume" and "VOIP Rx Volume" shipped as pure stubs (both get
- * and put NULL) -- their gain lives in the modem/AoC telephony path, not in
- * this driver. A NULL get leaves the control unreadable, so alsactl store
- * aborts the whole card snapshot with -EPERM. Give them a trivial readable
- * value so ALSA state save/restore works; they stay write-inert.
- */
-static int aoc_stub_zero_ctl_get(struct snd_kcontrol *kcontrol,
-				 struct snd_ctl_elem_value *ucontrol)
-{
-	ucontrol->value.integer.value[0] = 0;
-	return 0;
-}
-
 static struct snd_kcontrol_new snd_aoc_ctl[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
@@ -2795,10 +2781,9 @@ static struct snd_kcontrol_new snd_aoc_ctl[] = {
 					  aoc_compr_offload_gain_ctl_get,
 					  aoc_compr_offload_gain_ctl_set, NULL),
 
-	SOC_SINGLE_EXT("Voice Call Rx Volume", SND_SOC_NOPM, 0, 100, 0,
-		       aoc_stub_zero_ctl_get, NULL),
-	SOC_SINGLE_EXT("VOIP Rx Volume", SND_SOC_NOPM, 0, 100, 0,
-		       aoc_stub_zero_ctl_get, NULL),
+	SOC_SINGLE_EXT("Voice Call Rx Volume", SND_SOC_NOPM, 0, 100, 0, NULL,
+		       NULL),
+	SOC_SINGLE_EXT("VOIP Rx Volume", SND_SOC_NOPM, 0, 100, 0, NULL, NULL),
 
 	SOC_SINGLE_EXT("PCM Stream Wait Time in MSec", SND_SOC_NOPM, 0, 1000000, 0, pcm_wait_time_get,
 		       pcm_wait_time_set),

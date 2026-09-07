@@ -473,23 +473,8 @@ static int wm_coeff_get(struct snd_kcontrol *kctl,
 	struct wm_coeff_ctl *ctl = bytes_ext_to_ctl(bytes_ext);
 	struct cs_dsp_coeff_ctl *cs_ctl = ctl->cs_ctl;
 	char *p = ucontrol->value.bytes.data;
-	int ret;
 
-	ret = cs_dsp_coeff_lock_and_read_ctrl(cs_ctl, 0, p, cs_ctl->len);
-
-	/*
-	 * Volatile controls (e.g. HALO_STATE) refuse reads with -EPERM while the
-	 * DSP is powered down, yet they advertise READ access -- so alsamixer and
-	 * alsactl store, which read every control, abort the whole card. Honour
-	 * the advertised READ: report zeros when the value is momentarily
-	 * unreadable instead of failing.
-	 */
-	if (ret == -EPERM) {
-		memset(p, 0, cs_ctl->len);
-		ret = 0;
-	}
-
-	return ret;
+	return cs_dsp_coeff_lock_and_read_ctrl(cs_ctl, 0, p, cs_ctl->len);
 }
 
 static int wm_coeff_tlv_get(struct snd_kcontrol *kctl,
@@ -504,11 +489,6 @@ static int wm_coeff_tlv_get(struct snd_kcontrol *kctl,
 	mutex_lock(&cs_ctl->dsp->pwr_lock);
 
 	ret = cs_dsp_coeff_read_ctrl(cs_ctl, 0, cs_ctl->cache, size);
-
-	/* See wm_coeff_get(): keep READ-advertising controls readable even when
-	 * the DSP is down (report the cache, which is zero-initialised). */
-	if (ret == -EPERM)
-		ret = 0;
 
 	if (!ret && copy_to_user(bytes, cs_ctl->cache, size))
 		ret = -EFAULT;

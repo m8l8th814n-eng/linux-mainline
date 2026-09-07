@@ -64,7 +64,14 @@ enum uc_device_id {
 #define AOC_CMD_DEBUG_ENABLE
 #define WAITING_TIME_MS 500
 
-#define PCM_TIMER_INTERVAL_NANOSECS 10e6
+/*
+ * Poll interval for sampling the AoC ring pointer. Vendor used 10 ms, which is
+ * fine for Android's AudioFlinger but too coarse for PipeWire's continuous
+ * clock read (position advances in period-sized jumps -> resampler wobble).
+ * 2 ms gives ~5x denser sampling so the raw pointer reported by .pointer is
+ * already fine-grained. Costs ~500 hrtimer wakeups/s, negligible here.
+ */
+#define PCM_TIMER_INTERVAL_NANOSECS 2e6
 #define COMPR_OFFLOAD_TIMER_INTERVAL_NANOSECS 5000e6
 #define AOC_COMPR_HRTIMER_IRQ_HANDLER_BYPASS
 #define DEFAULT_PCM_WAIT_TIME_IN_MSECS 10000

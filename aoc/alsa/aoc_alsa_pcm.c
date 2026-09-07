@@ -138,7 +138,6 @@ void aoc_timer_stop_sync(struct aoc_alsa_stream *alsa_stream)
 bool aoc_pcm_update_pos(struct aoc_alsa_stream *alsa_stream, unsigned long consumed)
 {
 	unsigned long buffer_cnt;
-	unsigned int adjust_pos = 0;
 
 	/* Update the pcm pointer  */
 	if (unlikely(alsa_stream->n_overflow)) {
@@ -166,15 +165,14 @@ bool aoc_pcm_update_pos(struct aoc_alsa_stream *alsa_stream, unsigned long consu
 		alsa_stream->prev_buffer_cnt = buffer_cnt;
 	}
 
-	/* Update the pos to a multiple of the period size */
-	if (alsa_stream->pos_delta > alsa_stream->period_size) {
-		adjust_pos = alsa_stream->pos_delta % alsa_stream->period_size;
-		if (adjust_pos) {
-			alsa_stream->pos -= adjust_pos;
-			alsa_stream->prev_consumed -= adjust_pos;
-		}
-	}
-
+	/*
+	 * Report the raw (consumed - hw_ptr_base) position, do NOT snap it to a
+	 * period_size multiple. .pointer is read continuously by PipeWire; a
+	 * period-quantized pos makes its clock/latency estimate advance in
+	 * period-sized jumps and the resampler wobbles (audible as time-stretch).
+	 * Android's AudioFlinger tolerated the snapped pointer; PipeWire does not.
+	 * The return below still gates period-elapsed on a full period consumed.
+	 */
 	return (alsa_stream->pos_delta >= alsa_stream->period_size) ? true : false;
 }
 
@@ -395,6 +393,36 @@ static int snd_aoc_pcm_open(struct snd_soc_component *component,
 	runtime->private_data = alsa_stream;
 	runtime->private_free = snd_aoc_pcm_free;
 	runtime->hw = snd_aoc_playback_hw;
+
+	/*
+	 * No Android audio HAL here (postmarketOS): nothing sets the per-endpoint
+	 * ring geometry that the AoC firmware expects. A userspace client such as
+	 * PipeWire then negotiates an arbitrary period that misaligns with the AoC
+	 * block -> "broken synth" glitch on the deep-buffer endpoint, clock-drift
+	 * "beat-repeat" on the free-running MMAP endpoint. Pin each playback
+	 * endpoint to the geometry from Google's audio_platform_configuration.xml
+	 * (usecase_attr; dev1 == pcm device number == idx). 48 kHz, frame-exact.
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		unsigned int period = 0, periods = 0;
+
+		switch (idx) {
+		case 0:  period = 48;  periods = 40; break; /* UC_MMAP_PLAYBACK    */
+		case 1:  period = 480; periods = 4;  break; /* UC_LOW_LATENCY      */
+		case 5:  period = 960; periods = 4;  break; /* UC_DEEP_BUFFER (spk) */
+		case 30: period = 480; periods = 3;  break; /* UC_IMMERSIVE        */
+		default: break;
+		}
+		if (period) {
+			snd_pcm_hw_constraint_minmax(runtime,
+				SNDRV_PCM_HW_PARAM_RATE, 48000, 48000);
+			snd_pcm_hw_constraint_minmax(runtime,
+				SNDRV_PCM_HW_PARAM_PERIOD_SIZE, period, period);
+			snd_pcm_hw_constraint_minmax(runtime,
+				SNDRV_PCM_HW_PARAM_PERIODS, periods, periods);
+		}
+	}
+
 	chip->alsa_stream[idx] = alsa_stream;
 	chip->opened |= (1 << idx);
 	alsa_stream->open = 1;
@@ -741,15 +769,22 @@ static snd_pcm_uframes_t snd_aoc_pcm_pointer(struct snd_soc_component *component
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct aoc_alsa_stream *alsa_stream = runtime->private_data;
-	int pointer;
+	snd_pcm_uframes_t pointer;
 
-	pr_debug("pcm_pointer... (%d) hwptr=%ld appl=%ld pos=%d\n", 0,
-		 frames_to_bytes(runtime, runtime->status->hw_ptr),
-		 frames_to_bytes(runtime, runtime->control->appl_ptr), alsa_stream->pos);
+	/*
+	 * Report the raw ring position. pos comes from aoc_ring_bytes_read(),
+	 * i.e. the samples the AoC has actually consumed at the audio PLL rate
+	 * -- the *true* audio clock, and monotonic. Do NOT extrapolate with
+	 * ktime: the system counter (ktime/arch-timer) is a different clock from
+	 * the audio PLL, so time-based interpolation drifts from real
+	 * consumption and overshoots -> the pointer jumps back and PipeWire
+	 * replays slices (Ableton-style beat-repeat). Instead the hrtimer polls
+	 * this position often enough (PCM_TIMER_INTERVAL_NANOSECS) that the raw
+	 * value is already fine-grained.
+	 */
+	pointer = bytes_to_frames(runtime, alsa_stream->pos);
 
-	pointer = bytes_to_frames(substream->runtime, alsa_stream->pos);
-
-	pr_debug("pcm pointer  = %d\n", pointer);
+	pr_debug("pcm pointer = %lu\n", pointer);
 	return pointer;
 }
 

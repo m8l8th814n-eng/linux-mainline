@@ -1083,13 +1083,13 @@ static int compr_offload_volume_get(struct snd_kcontrol *kcontrol,
 {
 	struct aoc_chip *chip = snd_kcontrol_chip(kcontrol);
 
+	if(chip->compr_offload_volume<0 || chip->compr_offload_volume>1000)
+		return -EINVAL;
+
 	if (mutex_lock_interruptible(&chip->audio_mutex))
 		return -EINTR;
 
-	/* Clamp for the report rather than returning -EINVAL on an out-of-range
-	 * value: a get that errors aborts alsactl store for the whole card. */
-	ucontrol->value.integer.value[0] =
-		clamp_val(chip->compr_offload_volume, 0, 1000);
+	ucontrol->value.integer.value[0] = chip->compr_offload_volume;
 	mutex_unlock(&chip->audio_mutex);
 	return 0;
 }
@@ -2051,10 +2051,8 @@ static int hac_amp_en_get(struct snd_kcontrol *kcontrol,
 		ucontrol->value.integer.value[0] =
 			gpiod_get_value_cansleep(chip->hac_amp_en_gpio);
 	} else {
-		/* No HAC amp GPIO on this device: report 0 instead of -EINVAL
-		 * so alsactl store can snapshot the card. */
-		ucontrol->value.integer.value[0] = 0;
-		pr_debug("hac amp not present\n");
+		err = -EINVAL;
+		pr_err("not support hac amp\n");
 	}
 	return err;
 }
@@ -2069,9 +2067,8 @@ static int hac_amp_en_set(struct snd_kcontrol *kcontrol,
 		gpiod_set_value_cansleep(chip->hac_amp_en_gpio,
 				ucontrol->value.integer.value[0]?1:0);
 	} else {
-		/* No HAC amp: accept the write as a no-op so alsactl restore
-		 * (which replays the stored 0) does not fail/log per boot. */
-		pr_debug("hac amp not present\n");
+		err = -EINVAL;
+		pr_err("not support hac amp\n");
 	}
 	return err;
 }

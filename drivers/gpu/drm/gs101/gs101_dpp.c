@@ -347,8 +347,15 @@ static int gs101_dpp_bind(struct device *dev, struct device *master,
 				       gs101_dpp_formats,
 				       ARRAY_SIZE(gs101_dpp_formats),
 				       NULL, DRM_PLANE_TYPE_PRIMARY, NULL);
-	if (ret)
+	if (ret) {
+		/*
+		 * The component core does not call ->unbind() when ->bind()
+		 * fails, so the pm_runtime reference taken above must be dropped
+		 * here or it leaks (SysMMU/DPP kept resumed forever).
+		 */
+		pm_runtime_put_sync(dev);
 		return ret;
+	}
 
 	drm_plane_helper_add(&dpp->plane, &gs101_dpp_plane_helper_funcs);
 

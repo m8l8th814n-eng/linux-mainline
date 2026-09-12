@@ -15,7 +15,7 @@
 #include <linux/init.h>
 #include <linux/arm-smccc.h>
 
-#define SMC_FC_API_VERSION          0xBC00000BU  /* fastcall, entity 60, fn 11 */
+#define SMC_FC_API_VERSION          0xBC00000BUL  /* fastcall, entity 60, fn 11 */
 #define SMC_FC_GET_VERSION_STR      0xBC00000AU  /* fastcall, entity 60, fn 10 */
 #define TRUSTY_API_VERSION_CURRENT  5
 

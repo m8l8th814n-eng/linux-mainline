@@ -231,7 +231,7 @@ static const struct kernel_param_ops aoc_force_magic_ops = {
 module_param_cb(aoc_force_magic, &aoc_force_magic_ops, NULL, 0200);
 MODULE_PARM_DESC(aoc_force_magic, "Write AOC_MAGIC into the IPC block by hand");
 
-static bool aoc_ignore_watchdog;
+static bool aoc_ignore_watchdog = true;
 module_param(aoc_ignore_watchdog, bool, 0644);
 MODULE_PARM_DESC(aoc_ignore_watchdog, "Ignore AoC watchdog interrupts entirely");
 
@@ -776,7 +776,28 @@ static int aoc_hwmgr_ssmt_setup(struct aoc_prvdata *prvdata)
 	init_completion(&ctx.replied);
 	ctx.status = -EIO;
 
-	chan = tipc_create_channel(NULL, &aoc_ssmt_ops, &ctx);
+	/*
+	 * trusty-ipc only publishes its default_vdev once Trusty has sent
+	 * TIPC_CTRL_MSGTYPE_GO_ONLINE (see _go_online -> create_cdev_node),
+	 * which races AoC bring-up. Until then tipc_create_channel(NULL) returns
+	 * -ENOENT. Wait for it so SSMT is programmed BEFORE AoC is released and
+	 * SPEECH_INIT runs (otherwise SPEECH_IN faults at PC=0 on an unmapped
+	 * stream and AoC never publishes its own magic).
+	 */
+	{
+		int tries;
+
+		for (tries = 0; tries < 200; tries++) {
+			chan = tipc_create_channel(NULL, &aoc_ssmt_ops, &ctx);
+			if (!IS_ERR(chan) || PTR_ERR(chan) != -ENOENT)
+				break;
+			msleep(20);
+		}
+		if (tries)
+			dev_info(prvdata->dev,
+				 "SSMT: waited %d ms for trusty-ipc online\n",
+				 tries * 20);
+	}
 	if (IS_ERR(chan)) {
 		dev_warn(prvdata->dev, "SSMT: tipc channel create failed: %ld\n",
 			 PTR_ERR(chan));
@@ -1028,7 +1049,17 @@ static void aoc_fw_callback(const struct firmware *fw, void *ctx)
 	if (gsa_enabled) {
 		int rc;
 
-		if (prvdata->domain)
+		/*
+		 * Only install the fault handler on a domain that can accept
+		 * one. Here prvdata->domain is the managed default/DMA domain
+		 * (cookie_type != IOMMU_COOKIE_NONE); mainline's
+		 * iommu_set_fault_handler() WARNs (iommu.c:2061) and returns
+		 * without installing on such a domain -- so the handler was
+		 * never actually active and the unconditional call only produced
+		 * the boot-time WARNING. Guard it to silence that.
+		 */
+		if (prvdata->domain &&
+		    prvdata->domain->cookie_type == IOMMU_COOKIE_NONE)
 			iommu_set_fault_handler(prvdata->domain,
 						aoc_iommu_fault_handler, dev);
 
@@ -1492,7 +1523,7 @@ static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
 	}
 
 	strscpy(reason_str, buf, sizeof(reason_str));
-	dev_err(dev, "Reset requested from userspace, reason: %s", reason_str);
+	dev_err_ratelimited(dev, "Reset requested from userspace, reason: %s", reason_str);
 
 	if (prvdata->no_ap_resets) {
 		dev_err(dev, "Reset request rejected, option disabled via persist options");

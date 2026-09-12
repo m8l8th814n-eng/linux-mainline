@@ -538,11 +538,21 @@ static int gs101_decon_probe(struct platform_device *pdev)
 	/*
 	 * Clocks stay on from here. The handler touches registers, so the block
 	 * has to remain accessible; dropping them at the end of probe was only
-	 * correct while nothing ran afterwards. pm_runtime should own this once
-	 * atomic_enable()/atomic_disable() do.
+	 * correct while nothing ran afterwards. Runtime PM is enabled so the
+	 * CRTC's get_sync/put_sync refcount correctly -- there are no
+	 * runtime_suspend/resume callbacks yet, so it does not gate the clocks;
+	 * that ownership moves here once atomic_enable()/atomic_disable() do.
 	 */
+	pm_runtime_enable(dev);
 
-	return component_add(dev, &gs101_decon_component_ops);
+	ret = component_add(dev, &gs101_decon_component_ops);
+	if (ret) {
+		pm_runtime_disable(dev);
+		clk_bulk_disable_unprepare(ARRAY_SIZE(decon->clks), decon->clks);
+		return dev_err_probe(dev, ret, "failed to add component\n");
+	}
+
+	return 0;
 }
 
 /*
@@ -601,7 +611,11 @@ static const struct component_ops gs101_decon_component_ops = {
 
 static void gs101_decon_remove(struct platform_device *pdev)
 {
+	struct gs101_decon *decon = platform_get_drvdata(pdev);
+
 	component_del(&pdev->dev, &gs101_decon_component_ops);
+	pm_runtime_disable(&pdev->dev);
+	clk_bulk_disable_unprepare(ARRAY_SIZE(decon->clks), decon->clks);
 }
 
 static const struct of_device_id gs101_decon_of_match[] = {

@@ -1952,8 +1952,8 @@ static void _handle_ctrl_msg(struct tipc_virtio_dev *vds,
 		return;
 	}
 
-	dev_dbg(&vds->vdev->dev,
-		"%s: Incoming ctrl message: src 0x%x type %d len %d\n",
+	dev_info(&vds->vdev->dev,
+		"DBG %s: Incoming ctrl message: src 0x%x type %d len %d\n",
 		__func__, src, msg->type, msg->body_len);
 
 	switch (msg->type) {
@@ -2109,6 +2109,8 @@ static void _rxvq_cb(struct virtqueue *rxvq)
 		msg_cnt++;
 	}
 
+	dev_info(&vds->vdev->dev, "DBG _rxvq_cb: processed %u msg(s)\n", msg_cnt);
+
 	/* tell the other size that we added rx buffers */
 	if (msg_cnt)
 		virtqueue_kick(rxvq);
@@ -2206,6 +2208,17 @@ static int tipc_virtio_probe(struct virtio_device *vdev)
 
 	vdev->priv = vds;
 	vds->state = VDS_OFFLINE;
+
+	/*
+	 * The resident (stock) Trusty never sends TIPC_CTRL_MSGTYPE_GO_ONLINE
+	 * on this mainline / no-pKVM boot -- it rejects our vq kicks with -7 --
+	 * so default_vdev would never be published and tipc_create_channel()
+	 * would always return -ENOENT (hwmgr.aoc unreachable). Force the device
+	 * online ourselves so tipc is usable and channels can be created.
+	 */
+	_go_online(vds);
+	dev_info(&vdev->dev, "DBG tipc_virtio_probe: forced _go_online, state=%d\n",
+		 vds->state);
 
 	dev_dbg(&vdev->dev, "%s: done\n", __func__);
 	return 0;

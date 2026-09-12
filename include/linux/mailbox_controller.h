@@ -112,7 +112,16 @@ struct mbox_controller {
  * REVISIT: If too many platforms see the "Try increasing MBOX_TX_QUEUE_LEN"
  * print, it needs to be taken from config option or somesuch.
  */
-#define MBOX_TX_QUEUE_LEN	128	/* was 31; AoC wc-mbox floods it, vendor uses 128 pending */
+/*
+ * 128 (upstream default 20). The AoC wc-mbox client (16 channels) queues a
+ * doorbell per IPC ring write and can burst well past 20 pending; a shallow
+ * queue drops sends (mbox_send_message returns -ENOMEM, which signal_aoc does
+ * not check) -> AoC misses the wake -> ALSA command timeouts. Vendor runs 128.
+ * NOTE: this is a global struct-array size (bloats every mbox_chan on the
+ * system). Acceptable on this single-platform gs101 tree (few controllers);
+ * NOT upstreamable as-is -- upstream would need per-controller queue depth.
+ */
+#define MBOX_TX_QUEUE_LEN	128
 
 /**
  * struct mbox_chan - s/w representation of a communication chan

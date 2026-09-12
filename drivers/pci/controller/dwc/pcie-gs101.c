@@ -263,8 +263,27 @@ static irqreturn_t gs101_pcie_irq_handler(int irq, void *arg)
 	return IRQ_HANDLED;
 }
 
+static void gs101_pcie_host_deinit(struct dw_pcie_rp *pp)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+	struct gs101_pcie *pcie = to_gs101_pcie(pci);
+
+	/*
+	 * Reverse gs101_pcie_host_init(), in reverse order. The DWC core calls
+	 * this from its error path (after ->init succeeded but a later step of
+	 * dw_pcie_host_init() failed) and on teardown; without it the clocks and
+	 * PHY leak. The core guards the call with "if (pp->ops->deinit)", so its
+	 * absence is not a crash -- just a leak.
+	 */
+	gpiod_set_value_cansleep(pcie->perst, 1);
+	phy_exit(pcie->phy);
+	gs101_pcie_phy_isolation(pcie, false);
+	clk_bulk_disable_unprepare(pcie->num_clks, pcie->clks);
+}
+
 static const struct dw_pcie_host_ops gs101_pcie_host_ops = {
 	.init = gs101_pcie_host_init,
+	.deinit = gs101_pcie_host_deinit,
 };
 
 static const struct dw_pcie_ops gs101_dw_pcie_ops = {

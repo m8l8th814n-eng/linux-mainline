@@ -395,7 +395,7 @@
 				regulator-max-microvolt = <1950000>;
 			};
 
-			ldo20m {
+			s2mpg10_ldo20m: ldo20m {
 				/* DMIC, memory power */
 				regulator-name = "vddq_aoc_pdm";
 				regulator-min-microvolt = <1600000>;
@@ -1154,22 +1154,25 @@
 		/*
 		 * vendor parity. NOTE: mainline's cs35l41 driver does NOT
 		 * parse hw-noise-gate-select (no-op here, kept for parity).
-		 * cirrus,hibernate-enable is deliberately NOT set: the driver
-		 * now honors it, and the halo DSP mailbox wake fails on gs101,
-		 * which latches runtime_error and storms the IRQ. Add it back
-		 * only once DSP hibernate wake works.
+		 * cirrus,hibernate-enable REMOVED: the Sep-6 build that played
+		 * did NOT have it, and on gs101 the halo DSP mailbox wake fails
+		 * (latches runtime_error, storms the IRQ) -- hibernate events
+		 * spam every playback prepare. Matches the working build.
 		 */
 		cirrus,hw-noise-gate-select = <63>;
 
 		/*
-		 * Drive the interrupt out of GPIO2, which is what the
-		 * interrupts property above listens to. The vendor sets
-		 * this through a cirrus,gpio-config2 child node; mainline
-		 * spells the same thing as flat properties, so the vendor
-		 * form would have been ignored silently.
+		 * Drive the interrupt out of GPIO2 (open-drain INT), which the
+		 * interrupts property above listens to. The cs35l41dna driver
+		 * parses this ONLY from a cirrus,gpio-config2 child node
+		 * (of_get_child_by_name, cs35l41.c:3637) -- the flat
+		 * cirrus,gpio2-* form was silently ignored. src-select = 0x4
+		 * per vendor (all devices: ripcurrentpro/akita/caimito).
 		 */
-		cirrus,gpio2-src-select = <0x5>;
-		cirrus,gpio2-output-enable;
+		cirrus,gpio-config2 {
+			cirrus,gpio-src-select = <0x4>;
+			cirrus,gpio-output-enable;
+		};
 
 		controller-data {
 			/*
@@ -1214,21 +1217,24 @@
 		cirrus,asp-sdout-hiz = <3>;
 		/*
 		 * vendor parity (mainline driver doesn't parse these two -
-		 * no-ops, kept for parity). hibernate deliberately off; see
-		 * cs35l41_l for why.
+		 * no-ops, kept for parity). hibernate-enable REMOVED to match
+		 * the Sep-6 build that played; see cs35l41_l.
 		 */
 		cirrus,hw-noise-gate-select = <63>;
 		cirrus,right-channel-amp;
 
 		/*
-		 * Drive the interrupt out of GPIO2, which is what the
-		 * interrupts property above listens to. The vendor sets
-		 * this through a cirrus,gpio-config2 child node; mainline
-		 * spells the same thing as flat properties, so the vendor
-		 * form would have been ignored silently.
+		 * Drive the interrupt out of GPIO2 (open-drain INT), which the
+		 * interrupts property above listens to. The cs35l41dna driver
+		 * parses this ONLY from a cirrus,gpio-config2 child node
+		 * (of_get_child_by_name, cs35l41.c:3637) -- the flat
+		 * cirrus,gpio2-* form was silently ignored. src-select = 0x4
+		 * per vendor (all devices: ripcurrentpro/akita/caimito).
 		 */
-		cirrus,gpio2-src-select = <0x5>;
-		cirrus,gpio2-output-enable;
+		cirrus,gpio-config2 {
+			cirrus,gpio-src-select = <0x4>;
+			cirrus,gpio-output-enable;
+		};
 
 		controller-data {
 			samsung,spi-feedback-delay = <1>;
@@ -1298,6 +1304,15 @@
 	sensor_1v8-supply = <&s2mpg11_ldo7s>;
 	sensor_3v3-supply = <&s2mpg11_ldo6s>;
 	sensor_power_list = "sensor_1v8", "sensor_3v3";
+
+	/*
+	 * DMIC/PDM rail (ldo20m "vddq_aoc_pdm"). Let AoC manage it so the
+	 * SPEECH/hotword mic setup has power. NOTE: ldo20m is regulator-always-on
+	 * + ext-control (EN2), so this may be redundant; if it also feeds memory
+	 * the exclusive get will fail ("failed to get dmic regulator").
+	 */
+	dmic-supply = <&s2mpg10_ldo20m>;
+	dmic_power_list = "dmic";
 };
 
 /*

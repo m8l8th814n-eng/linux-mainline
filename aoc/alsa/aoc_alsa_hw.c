@@ -194,6 +194,21 @@ static bool aoc_pcm_is_mmap_raw(struct aoc_alsa_stream *alsa_stream)
 /*
  * Sending commands to AoC for setting parameters and start/stop the streams
  */
+/*
+ * Circuit breaker for a non-draining AoC command ring (FF1/SPEECH_IN state).
+ * Plasma polls dozens of mixer controls on every audio event (play, volume,
+ * unmute); each command that reaches the wait loop below costs WAITING_TIME_MS.
+ * After a few consecutive timeouts we fast-fail every command for a short
+ * cooldown so audio events stay responsive instead of stalling the desktop.
+ * When the cooldown expires one command gets through to probe for recovery; a
+ * response clears the breaker. Racy reads are benign -- it is only a heuristic
+ * to avoid hammering a dead ring.
+ */
+#define AOC_CMD_FAIL_STREAK_TRIP	3
+#define AOC_CMD_COOLDOWN_MS		2000
+static int aoc_cmd_fail_streak;
+static unsigned long aoc_cmd_cooldown_until;
+
 static int aoc_audio_control(const char *cmd_channel, const uint8_t *cmd,
 			     size_t cmd_size, uint8_t *response,
 			     struct aoc_chip *chip)
@@ -207,6 +222,10 @@ static int aoc_audio_control(const char *cmd_channel, const uint8_t *cmd,
 
 	if (!cmd_channel || !cmd)
 		return -EINVAL;
+
+	if (aoc_cmd_cooldown_until &&
+	    time_before(jiffies, READ_ONCE(aoc_cmd_cooldown_until)))
+		return -ENODEV;	/* permanent: make the caller suspend, not spin-retry */
 
 	if (mutex_lock_interruptible(&chip->audio_cmd_chan_mutex))
 		return -EINTR;
@@ -278,15 +297,24 @@ static int aoc_audio_control(const char *cmd_channel, const uint8_t *cmd,
 
 	if (err < 1) {
 		uint16_t cmd_id = ((struct CMD_HDR *)cmd)->id;
-		char reset_reason[40];
 
-		scnprintf(reset_reason, sizeof(reset_reason), "ALSA command timeout %#06x",
-			cmd_id);
 		pr_err(ALSA_AOC_CMD " ERR:timeout - cmd [%s] id %#06x\n",
 		       CMD_CHANNEL(dev), cmd_id);
 		print_hex_dump(KERN_ERR, ALSA_AOC_CMD " :mem ",
 			       DUMP_PREFIX_OFFSET, 16, 1, cmd, cmd_size, false);
-		aoc_trigger_watchdog(reset_reason);
+		/*
+		 * Do NOT trigger an AoC reset on an ALSA command timeout.
+		 * A timeout is routine while the audio service is not draining
+		 * the ring (FF1/SPEECH_IN state), and Plasma fires three commands
+		 * at once on any audio event (play + volume + unmute). Each
+		 * aoc_trigger_watchdog() -> reset_store() starts an SSR that
+		 * mainline cannot complete, so three back-to-back wedge the whole
+		 * AoC -- that is the "audio crashes on every event" hang. Just
+		 * return the error; the ALSA caller handles it gracefully.
+		 */
+		if (++aoc_cmd_fail_streak >= AOC_CMD_FAIL_STREAK_TRIP)
+			WRITE_ONCE(aoc_cmd_cooldown_until,
+				   jiffies + msecs_to_jiffies(AOC_CMD_COOLDOWN_MS));
 	} else if (err == 4) {
 		pr_err(ALSA_AOC_CMD " ERR:%#x - cmd [%s] id %#06x\n",
 		       *(uint32_t *)buffer, CMD_CHANNEL(dev),
@@ -297,6 +325,12 @@ static int aoc_audio_control(const char *cmd_channel, const uint8_t *cmd,
 		pr_debug(ALSA_AOC_CMD
 			 " cmd [%s] id %#06x, reply mesg size %d\n",
 			 CMD_CHANNEL(dev), ((struct CMD_HDR *)cmd)->id, err);
+	}
+
+	/* AoC responded -- clear the circuit breaker. */
+	if (err >= 1) {
+		aoc_cmd_fail_streak = 0;
+		WRITE_ONCE(aoc_cmd_cooldown_until, 0);
 	}
 
 	if (response != NULL)

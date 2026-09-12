@@ -1083,13 +1083,16 @@ static int compr_offload_volume_get(struct snd_kcontrol *kcontrol,
 {
 	struct aoc_chip *chip = snd_kcontrol_chip(kcontrol);
 
-	if(chip->compr_offload_volume<0 || chip->compr_offload_volume>1000)
-		return -EINVAL;
-
 	if (mutex_lock_interruptible(&chip->audio_mutex))
 		return -EINTR;
 
-	ucontrol->value.integer.value[0] = chip->compr_offload_volume;
+	/*
+	 * Report a clamped value instead of failing with -EINVAL on an
+	 * out-of-range stored volume -- a failing .get aborts `alsactl store`
+	 * for the whole card.
+	 */
+	ucontrol->value.integer.value[0] =
+		clamp(chip->compr_offload_volume, 0, 1000);
 	mutex_unlock(&chip->audio_mutex);
 	return 0;
 }
@@ -2051,8 +2054,13 @@ static int hac_amp_en_get(struct snd_kcontrol *kcontrol,
 		ucontrol->value.integer.value[0] =
 			gpiod_get_value_cansleep(chip->hac_amp_en_gpio);
 	} else {
-		err = -EINVAL;
-		pr_err("not support hac amp\n");
+		/*
+		 * No HAC amp GPIO on this board (gs101/oriole). Report 0 and
+		 * stay readable -- returning -EINVAL here made the control fail
+		 * its .get, which aborts `alsactl store` and alsamixer for the
+		 * whole card.
+		 */
+		ucontrol->value.integer.value[0] = 0;
 	}
 	return err;
 }
@@ -2448,6 +2456,26 @@ static const char *ft_aec_ref_source_texts[NUM_AEC_REF_SOURCE] = { "Default", "S
 								   "BT" };
 static SOC_ENUM_SINGLE_DECL(ft_aec_ref_source_enum, 1, 0, ft_aec_ref_source_texts);
 
+/*
+ * "Voice Call Rx Volume" / "VOIP Rx Volume" have no AoC control wired on this
+ * port. They are declared SOC_SINGLE_EXT (READWRITE), so a NULL .get makes the
+ * ALSA core return -EPERM on read, which aborts `alsactl store` / alsamixer for
+ * the whole card. Provide a readable stub (reports 0) and a no-op writable stub
+ * so both store and restore stay happy.
+ */
+static int rx_volume_stub_get(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = 0;
+	return 0;
+}
+
+static int rx_volume_stub_put(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	return 0;
+}
+
 static struct snd_kcontrol_new snd_aoc_ctl[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
@@ -2781,9 +2809,10 @@ static struct snd_kcontrol_new snd_aoc_ctl[] = {
 					  aoc_compr_offload_gain_ctl_get,
 					  aoc_compr_offload_gain_ctl_set, NULL),
 
-	SOC_SINGLE_EXT("Voice Call Rx Volume", SND_SOC_NOPM, 0, 100, 0, NULL,
-		       NULL),
-	SOC_SINGLE_EXT("VOIP Rx Volume", SND_SOC_NOPM, 0, 100, 0, NULL, NULL),
+	SOC_SINGLE_EXT("Voice Call Rx Volume", SND_SOC_NOPM, 0, 100, 0,
+		       rx_volume_stub_get, rx_volume_stub_put),
+	SOC_SINGLE_EXT("VOIP Rx Volume", SND_SOC_NOPM, 0, 100, 0,
+		       rx_volume_stub_get, rx_volume_stub_put),
 
 	SOC_SINGLE_EXT("PCM Stream Wait Time in MSec", SND_SOC_NOPM, 0, 1000000, 0, pcm_wait_time_get,
 		       pcm_wait_time_set),

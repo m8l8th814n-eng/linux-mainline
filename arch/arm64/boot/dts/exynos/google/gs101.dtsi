@@ -536,32 +536,35 @@
 		};
 
 		/*
-		 * 52 MB, not 48. The AoC firmware image carries its own iommu
-		 * table, and it asks for two physically adjacent ranges:
+		 * The AoC firmware image carries its own iommu table and asks
+		 * for TWO physically adjacent DRAM ranges:
 		 *
-		 *   va 0x98000000 -> pa 0x94000000  0x3000000
-		 *   va 0x9b000000 -> pa 0x97000000  0x0400000
+		 *   va 0x98000000 -> pa 0x94000000  0x3000000   (the carveout)
+		 *   va 0x9b000000 -> pa 0x97000000  0x0400000   (extra 4 MB)
 		 *
-		 * 0x94000000 + 0x3000000 is 0x97000000, so the firmware expects
-		 * one contiguous 0x3400000 region. Reserving only 0x3000000
-		 * leaves the last 4 MB as ordinary kernel memory, which AoC then
-		 * writes to -- the machine dies instantly with no panic, because
-		 * the corruption lands in whatever the kernel had there.
+		 * Both MUST be reserved no-map, or AoC DMA to the second range
+		 * corrupts whatever the kernel placed at 0x97000000 (intermittent
+		 * -- silent hang / audio IPC ring corruption when that page is in
+		 * use). Vendor gs101-rmem.dtsi only reserves the 48 MB carveout;
+		 * we add the 4 MB tail explicitly.
 		 *
-		 * Must stay "no-map": the driver claims this range with
-		 * devm_request_mem_region() and maps it with devm_ioremap_wc(),
-		 * which requires the memory to be outside System RAM.
+		 * They are kept as SEPARATE nodes on purpose: kAOCCarveoutSize is
+		 * derived from aoc_reserve's size, and the aoc.bin (polygon build)
+		 * is built for a 48 MB carveout -- so aoc_reserve stays 0x3000000
+		 * (do NOT merge into a 0x3400000 region, that shifts the dma-buf
+		 * heaps and mislays the firmware layout). The tail is protected
+		 * without being part of the carveout the driver manages.
+		 *
+		 * no-map: the driver claims/maps these with request_mem_region +
+		 * ioremap_wc, which require the memory to be outside System RAM.
 		 */
 		aoc_reserve: aoc@94000000 {
-			/*
-			 * 48 MB (0x3000000), matching the vendor gs101-rmem.dtsi.
-			 * dram_size is passed to the firmware as kAOCCarveoutSize;
-			 * the aoc.bin (polygon build) is built for a 48 MB carveout,
-			 * and the driver carves its dma-buf heaps from base+size, so
-			 * an oversized region shifts those and can throw off the
-			 * firmware's memory layout. Was 0x3400000 (52 MB).
-			 */
 			reg = <0x0 0x94000000 0x03000000>;
+			no-map;
+		};
+
+		aoc_iommu_tail: aoc-tail@97000000 {
+			reg = <0x0 0x97000000 0x00400000>;
 			no-map;
 		};
 

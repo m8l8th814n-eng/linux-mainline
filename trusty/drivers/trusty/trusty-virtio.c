@@ -25,6 +25,7 @@
 #include <linux/virtio_config.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_ring.h>
+#include <linux/delay.h>
 
 #include <linux/atomic.h>
 
@@ -146,14 +147,14 @@ static bool trusty_virtio_notify(struct virtqueue *vq)
 	struct trusty_vring *tvr = vq->priv;
 	struct trusty_vdev *tvdev = tvr->tvdev;
 	struct trusty_ctx *tctx = tvdev->tctx;
-	u32 api_ver = trusty_get_api_version(tctx->dev->parent);
-
-	if (api_ver < TRUSTY_API_VERSION_SMP_NOP) {
-		atomic_set(&tvr->needs_kick, 1);
-		queue_work(tctx->kick_wq, &tctx->kick_vqs);
-	} else {
-		trusty_enqueue_nop(tctx->dev->parent, &tvr->kick_nop);
-	}
+	/*
+	 * The SMP-NOP notify path (api >= 3: trusty_enqueue_nop -> SMC_SC_NOP)
+	 * returns -7 (SM_ERR_INTERNAL_FAILURE) on this resident Trusty, so the
+	 * vq kick never reaches it and tipc never goes online. Always use the
+	 * direct SMC_SC_VDEV_KICK_VQ path (kick_vqs workqueue) instead.
+	 */
+	atomic_set(&tvr->needs_kick, 1);
+	queue_work(tctx->kick_wq, &tctx->kick_vqs);
 
 	return true;
 }
@@ -657,7 +658,13 @@ static int trusty_virtio_add_devices(struct trusty_ctx *tctx)
 		goto err_register_notifier;
 	}
 
-	/* start virtio */
+	/*
+	 * START must be issued here, before the tipc driver's find_vqs shares
+	 * the vrings; issuing it later makes Trusty reject it with -2. (DRIVER_OK
+	 * lands only after this probe returns, but Trusty does not require it for
+	 * START -- and it rejects vq kicks with -7 regardless, because this
+	 * resident Trusty runs no tipc/hwmgr backend.)
+	 */
 	ret = trusty_virtio_start(tctx, descr_id, descr_sz);
 	if (ret) {
 		dev_err(tctx->dev, "failed (%d) to start virtio\n", ret);
